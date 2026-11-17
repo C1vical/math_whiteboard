@@ -1,5 +1,5 @@
 import { useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { AArrowDown, AArrowUp, BringToFront, ClipboardCopy, Copy, Hand, Lock, LockOpen, Pencil, Scissors, SendToBack, SlidersHorizontal, Trash2 } from 'lucide-react';
+import { AArrowDown, AArrowUp, BringToFront, Check, ClipboardCopy, Copy, Crop, Hand, Lock, LockOpen, Pencil, RotateCcw, Scissors, SendToBack, SlidersHorizontal, Trash2, X } from 'lucide-react';
 import type { BoardObject, Shape } from '../../../shared/types';
 import { HL_COLORS, PEN_COLORS, TAPE_COLORS } from '../engine/store';
 import { cssColor, IconBtn, MOD, Popover, Section, Slider, Swatches, Toggle, useEngine, useUI } from './common';
@@ -7,6 +7,31 @@ import { clamp, copyText, UndoGroup } from './util';
 
 const colorOf = (o: BoardObject): string | null => (o.type === 'stroke' || o.type === 'shape' || o.type === 'text' || o.type === 'tape' ? o.color : null);
 const sizeOf = (o: BoardObject): number | null => (o.type === 'stroke' || o.type === 'shape' ? o.size : null);
+
+/** While an image is being cropped: apply, show the whole image again, or cancel. */
+function CropBar() {
+  const engine = useEngine();
+  const sel = useUI((s) => s.sel);
+  const ref = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const r = sel?.rect ?? { x: engine.vw / 2, y: 60, w: 0, h: 0 };
+    const w = el.offsetWidth, h = el.offsetHeight;
+    el.style.left = `${clamp(r.x + r.w / 2 - w / 2, 8, Math.max(8, engine.vw - w - 8))}px`;
+    let top = r.y - h - 18;
+    if (top < 8) top = clamp(r.y + r.h + 14, 8, Math.max(8, engine.vh - h - 60));
+    el.style.top = `${top}px`;
+  });
+  return (
+    <div ref={ref} className="float selbar cropbar" role="toolbar" aria-label="Crop" onPointerDown={(e) => e.stopPropagation()}>
+      <span className="cropbar-hint">Drag the handles to crop</span>
+      <button type="button" className="txt" data-tip="Show the whole image again" onClick={() => engine.resetCrop()}><RotateCcw size={15} /> Reset</button>
+      <button type="button" className="txt" data-tip="Cancel (Esc)" onClick={() => engine.cancelCrop()}><X size={16} /> Cancel</button>
+      <button type="button" className="txt primary" data-tip="Apply the crop (Enter)" onClick={() => engine.commitCrop()}><Check size={16} /> Done</button>
+    </div>
+  );
+}
 
 /** Small floating action bar that follows the current selection. */
 export function SelectionBar() {
@@ -17,6 +42,7 @@ export function SelectionBar() {
   const interact = useUI((s) => s.graphInteract);
   const textEdit = useUI((s) => s.textEdit);
   const busy = useUI((s) => s.selBusy);
+  const crop = useUI((s) => s.crop);
   const ref = useRef<HTMLDivElement>(null);
   const colorBtn = useRef<HTMLButtonElement | null>(null);
   const sizeBtn = useRef<HTMLButtonElement | null>(null);
@@ -44,6 +70,7 @@ export function SelectionBar() {
 
   useLayoutEffect(() => { setPop(null); group.end(); }, [key, group]);
 
+  if (crop) return <CropBar />;
   if (!sel || textEdit || busy) return null;
   const page = engine.page;
   const objs = sel.ids.map((id) => page.objects[id]).filter(Boolean);
@@ -102,6 +129,9 @@ export function SelectionBar() {
           <IconBtn tip="Smaller text" onClick={() => fontStep(-1)}><AArrowDown size={18} /></IconBtn>
           <IconBtn tip="Larger text" onClick={() => fontStep(1)}><AArrowUp size={18} /></IconBtn>
         </>
+      )}
+      {!locked && single?.type === 'image' && (
+        <IconBtn tip={single.crop ? 'Crop (change or reset the crop)' : 'Crop'} onClick={() => engine.beginCrop()}><Crop size={17} /></IconBtn>
       )}
       {single?.type === 'graph' && (
         <button

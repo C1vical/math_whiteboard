@@ -5,19 +5,22 @@ import {
 } from '../../../shared/geometry';
 import { cascade, placeImage, placeImages, type Rect } from '../../../shared/imageSize';
 import { applyOp, applyPageOp, applyWithInverse, findPage, newNotebook, notebookIsEmpty, type ApplyHooks } from '../../../shared/ops';
+import { cropOf, cropPatch, fromImageFraction, fullFrame } from '../../../shared/crop';
+import { inkToClear, tapeToCover } from '../../../shared/reset';
 import { protractorAngle } from '../../../shared/ruler';
 import {
   CLIP_MAX_CHARS, CLIP_PREFIX, DEFAULT_TITLE,
   type Background, type BBox, type BoardObject, type Camera, type ImageObj, type Notebook, type Op, type Page, type PageOp, type PresenceUser,
-  type RulerState, type StrokeStyle,
+  type RulerState, type StrokeStyle, type TimerAction,
 } from '../../../shared/types';
-import { loadGraph, onGraphLoaded } from './graphLoader';
+import { graphModule, loadGraph, onGraphLoaded } from './graphLoader';
 import { getCachedNotebook, putCachedNotebook } from './idb';
 import { ImageCache, prepareImage, uploadImage, type PreparedImage } from './images';
 import { drawCursor, drawLaser, drawRuler, LASER_MS, type LaserPoint } from './overlay';
 import { carryPath, drawBackground, drawLiveStroke, drawObject, drawTape, FONT, paintBounds, type RenderEnv } from './render';
 import { saveSettings, type PenFav, type Settings, type Store, type ToolId, type UIState } from './store';
 import { Sync, type PendingItem } from './sync';
+import { Thumbnails } from './thumbs';
 import { Input } from './tools';
 
 type DistOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
@@ -48,6 +51,9 @@ export class Engine {
   images: ImageCache;
   sync: Sync;
   input: Input;
+  /** sidebar page previews, drawn in idle time */
+  thumbs: Thumbnails;
+  private thumbListeners = new Set<(pageId: string) => void>();
   env: RenderEnv;
 
   sel = new Set<string>();
@@ -87,6 +93,13 @@ export class Engine {
   private dprQuery: MediaQueryList | null = null;
   private destroyed = false;
   private offGraph: () => void;
+  /** graphs on this page with a playing slider: they are redrawn every frame */
+  private animated: string[] = [];
+  private animAt = 0;
+  /** the coordinates shown after tapping a curve of the selected graph (display only) */
+  graphProbe: { id: string; x: number; y: number } | null = null;
+  /** "bring everyone here" that arrived while my pen was down: applied when it lifts */
+  private pendingSummon: { from: string; pageId: string; camera: Camera; vw: number; vh: number } | null = null;
   private hooks: ApplyHooks = { moved: carryPath };
   private toastId = 1;
   private textKey = 0;
@@ -115,14 +128,27 @@ export class Engine {
       return { w: Math.max(w, fontSize * 0.5), h: lines.length * fontSize * LINE_H };
     });
 
-    this.images = new ImageCache(() => { this.dirtyMain = true; this.requestFrame(); });
-    this.offGraph = onGraphLoaded(() => { if (!this.destroyed) this.invalidateMain(); });
+    this.images = new ImageCache(() => { this.dirtyMain = true; this.requestFrame(); this.touchThumbs((o) => o.type === 'image'); });
+    this.offGraph = onGraphLoaded(() => {
+      if (this.destroyed) return;
+      // playing sliders follow the server's clock, so every screen shows the same value
+      graphModule()?.setGraphClock(() => this.sync.serverNow());
+      this.refreshAnimated();
+      this.invalidate();
+      this.touchThumbs((o) => o.type === 'graph');
+    });
     this.env = {
       dark: ui.get().settings.dark,
       getImage: (src) => (src.startsWith('local:') ? this.placeholders.get(src.slice(6))?.drawable ?? null : this.images.get(src)),
       imageState: (src) => this.images.state(src),
     };
 
+    this.thumbs = new Thumbnails({
+      pages: () => this.nb.pages,
+      env: () => this.env,
+      busy: () => !!this.input.gesture,
+      changed: (pageId) => { for (const fn of this.thumbListeners) fn(pageId); },
+    });
     this.input = new Input(this);
     this.ro = new ResizeObserver(() => this.resize());
     this.ro.observe(container);
@@ -145,6 +171,7 @@ export class Engine {
   destroy() {
     this.destroyed = true;
     this.offGraph();
+    this.thumbs.stop();
     cancelAnimationFrame(this.raf);
     window.clearTimeout(this.cacheTimer);
     this.flushCache();
@@ -169,6 +196,7 @@ export class Engine {
     if (next.dark !== this.env.dark) {
       this.env.dark = next.dark;
       this.invalidate();
+      this.thumbs.refresh();
     }
     this.dirtyLive = true;
     this.requestFrame();
@@ -304,6 +332,14 @@ export class Engine {
         this.dirtyMain = true;
         again = true;
       }
+      if (this.animated.length) {
+        again = true;
+        if (now - this.animAt >= 32) {
+          this.animAt = now;
+          for (const id of this.animated) { const o = this.page.objects[id]; if (o && !this.isHidden(id)) this.invalidateRect(this.paintBounds(o)); }
+          if (this.sel.size === 1 && this.animated.includes([...this.sel][0])) this.dirtyLive = true; // points of interest move too
+        }
+      }
       if (this.rulerDirty) {
         this.rulerDirty = false;
         this.sync.emit('ruler', { pageId: this.pageId, ...this.ui.get().ruler });
@@ -392,7 +428,7 @@ export class Engine {
   }
 
   private isHidden(id: string): boolean {
-    return id === this.editingId || !!this.preview?.ids.has(id);
+    return id === this.editingId || !!this.preview?.ids.has(id) || this.ui.get().crop?.id === id;
   }
 
   private renderMain(now: number) {
@@ -552,6 +588,7 @@ export class Engine {
     }
 
     this.input.draw(ctx);
+    this.drawCrop(ctx);
 
     // rulers: remote ones tinted in their owner's colour, mine on top
     const users = this.ui.get().users;
@@ -568,6 +605,7 @@ export class Engine {
     // ---- screen-space overlays ----
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     this.drawSelection(ctx);
+    this.drawGraphMarks(ctx);
 
     for (const [sid, e] of this.erasers) {
       if (now - e.t > 400) { this.erasers.delete(sid); continue; }
@@ -643,6 +681,8 @@ export class Engine {
   selLocked(): boolean { const o = this.selObjects(); return o.length > 0 && o.every((x) => x.locked); }
 
   private drawSelection(ctx: CanvasRenderingContext2D) {
+    // while cropping, only the crop handles show
+    if (this.ui.get().crop) return;
     let f = this.selFrame();
     if (!f) return;
     const m = this.preview && this.input.transformingSelection ? this.preview.m : null;
@@ -691,6 +731,9 @@ export class Engine {
 
   selChanged() {
     const page = this.page;
+    const crop = this.ui.get().crop;
+    if (crop && !page.objects[crop.id]) this.ui.set({ crop: null });
+    if (this.graphProbe && !(this.sel.size === 1 && this.sel.has(this.graphProbe.id))) this.graphProbe = null;
     for (const id of this.sel) if (!page.objects[id]) this.sel.delete(id);
     if (this.ui.get().graphInteract && !(this.sel.size === 1 && this.selObjects()[0]?.type === 'graph')) this.ui.set({ graphInteract: false });
     this.updateSelUI();
@@ -809,6 +852,17 @@ export class Engine {
     return false;
   }
 
+  /** Which graphs on this page have a playing slider. */
+  private refreshAnimated() {
+    const gm = graphModule();
+    const page = this.page;
+    const next: string[] = [];
+    if (gm) for (const id of page.order) { const o = page.objects[id]; if (o?.type === 'graph' && gm.isAnimated(o)) next.push(id); }
+    else if (page.order.some((id) => { const o = page.objects[id]; return o?.type === 'graph' && (o.sliders ?? []).some((sl) => sl.play); })) void loadGraph().catch(() => {});
+    this.animated = next;
+    if (next.length) this.requestFrame();
+  }
+
   /** Bookkeeping after any ops were applied to the notebook (mine or remote). */
   private afterOps(ops: Op[], remote: boolean, before: BBox | 'all' | null) {
     const page = this.page;
@@ -816,7 +870,9 @@ export class Engine {
     let touchedCurrent = false;
     // the cached bitmap can take a new top-most object directly, even while it is slid by a pan
     const clean = !this.dirtyMain && !this.dirtyRect && !this.replay && this.cam.zoom === this.mainCam.zoom;
+    const pagesChanged = new Set<string>();
     for (const op of ops) {
+      pagesChanged.add(op.pageId);
       if (op.kind === 'add' && remote) {
         const rs = this.remoteStrokes.get(op.obj.id);
         if (rs) { this.remoteStrokes.delete(op.obj.id); this.dirtyLive = true; }
@@ -837,7 +893,9 @@ export class Engine {
     if (touchedCurrent) {
       if (this.sel.size) this.selChanged();
       this.dirtyLive = true;
+      if (ops.some((op) => op.pageId === this.pageId && (op.kind === 'update' || op.kind === 'add' || op.kind === 'delete'))) this.refreshAnimated();
     }
+    for (const id of pagesChanged) this.thumbs.touch(id);
     this.syncPagesUI();
     this.scheduleCache();
     this.requestFrame();
@@ -863,7 +921,27 @@ export class Engine {
 
   private onRemotePageOp(op: PageOp) {
     applyPageOp(this.nb, op);
+    this.touchPageThumb(op);
     this.afterPageChange();
+  }
+
+  /** A page op that changes what a page looks like redraws its thumbnail. */
+  private touchPageThumb(op: PageOp) {
+    if (op.kind === 'setBackground') this.thumbs.touch(op.pageId);
+    else if (op.kind === 'duplicate') this.thumbs.touch(op.newId);
+    else if (op.kind === 'restorePage') this.thumbs.touch(op.page.id);
+  }
+
+  /** Redraws the thumbnails of pages holding objects that match (an image or the graph code arrived). */
+  private touchThumbs(match: (o: BoardObject) => boolean) {
+    if (!this.nb) return;
+    for (const p of this.nb.pages) if (p.order.some((id) => { const o = p.objects[id]; return !!o && match(o); })) this.thumbs.touch(p.id);
+  }
+
+  /** Subscribes to finished thumbnails; returns the unsubscribe function. */
+  onThumb(fn: (pageId: string) => void): () => void {
+    this.thumbListeners.add(fn);
+    return () => { this.thumbListeners.delete(fn); };
   }
 
   private afterPageChange() {
@@ -903,6 +981,7 @@ export class Engine {
     this.remoteStrokes.clear();
     this.enterPage();
     this.pagesKey = '';
+    this.thumbs.touchAll();
     this.syncPagesUI();
     this.selChanged();
     this.updateUndoUI();
@@ -1052,6 +1131,13 @@ export class Engine {
       case 'viewport':
         if (this.ui.get().following === d.sid) this.applyFollow(d);
         return;
+      case 'summon': {
+        const from = this.ui.get().users.find((u) => u.sid === d.sid)?.name ?? 'Your co-teacher';
+        this.pendingSummon = { from, pageId: d.pageId, camera: d.camera, vw: d.vw, vh: d.vh };
+        // never interrupt a stroke in progress: wait until the pen lifts
+        if (!this.input.gesture) this.gestureEnded();
+        return;
+      }
       case 'leave':
         this.cursors.delete(d.sid); this.rulers.delete(d.sid); this.lasers.delete(d.sid); this.erasers.delete(d.sid);
         for (const [id, rs] of this.remoteStrokes) if (rs.sid === d.sid) this.remoteStrokes.delete(id);
@@ -1064,6 +1150,107 @@ export class Engine {
     if (d.pageId !== this.pageId && findPage(this.nb, d.pageId)) this.gotoPage(d.pageId, true);
     const w = d.vw / d.camera.zoom, h = d.vh / d.camera.zoom;
     this.fitRect([d.camera.x, d.camera.y, d.camera.x + w, d.camera.y + h], 0, MAX_ZOOM);
+  }
+
+  /** Called by the input layer whenever a pointer gesture has finished (or none was active). */
+  gestureEnded() {
+    const s = this.pendingSummon;
+    if (!s || this.input.gesture) return;
+    this.pendingSummon = null;
+    if (!findPage(this.nb, s.pageId)) return;
+    this.stopFollow();
+    const te = this.ui.get().textEdit;
+    if (te) this.commitText(te.text);
+    this.applyFollow(s);
+    const n = this.nb.pages.findIndex((p) => p.id === s.pageId) + 1;
+    this.toast(`${s.from} brought you to page ${n}`);
+  }
+
+  /** The shared countdown: the server keeps its state and tells everyone (me included). */
+  timer(...actions: TimerAction[]) {
+    if (!this.sync.joined) { this.toast('The timer needs the connection to the server — try again in a moment', 'error'); return; }
+    for (const a of actions) this.sync.emit('timer', a);
+  }
+
+  /** Brings every other editor to my page and view, once (not a lasting follow). */
+  summonEveryone() {
+    const others = this.ui.get().users.filter((u) => u.sid !== this.me.sid);
+    if (!others.length) { this.toast('Nobody else is on this board yet'); return; }
+    this.sync.emit('summon', { pageId: this.pageId, camera: this.cam, vw: this.vw, vh: this.vh });
+    const n = this.nb.pages.findIndex((p) => p.id === this.pageId) + 1;
+    this.toast(`Brought ${others.length === 1 ? others[0].name : `${others.length} people`} to page ${n}`);
+  }
+
+  // ---------- graph points of interest (display only) ----------
+  /** Shows the coordinates of the curve point nearest to a tap on the selected graph. */
+  probeGraph(wx: number, wy: number, tolPx: number) {
+    const gm = graphModule();
+    const g = this.selObjects()[0];
+    if (!gm || this.sel.size !== 1 || g?.type !== 'graph') return;
+    const [gx, gy] = gm.worldToGraph(g, wx, wy);
+    const tolX = ((tolPx / this.cam.zoom) / g.w) * (g.xMax - g.xMin), tolY = ((tolPx / this.cam.zoom) / g.h) * (g.yMax - g.yMin);
+    // a marked point nearby wins: its coordinates are exact
+    const poi = gm.graphPOIs(g).find((p) => Math.abs(p.x - gx) <= tolX && Math.abs(p.y - gy) <= tolY);
+    const hit = poi ? { ...poi, id: g.id } : gm.probeGraph(g, gx, gy, tolX, tolY);
+    this.graphProbe = hit ? { id: g.id, x: hit.x, y: hit.y } : null;
+    this.invalidateLive();
+  }
+
+  private drawGraphMarks(ctx: CanvasRenderingContext2D) {
+    const gm = graphModule();
+    const g = this.sel.size === 1 ? this.selObjects()[0] : null;
+    if (!gm || g?.type !== 'graph' || this.preview || this.replay) return;
+    const pois = gm.graphPOIs(g);
+    const toS = (gx: number, gy: number) => this.toScreen(...gm.graphToWorld(g, gx, gy));
+    const dark = this.env.dark;
+    ctx.save();
+    ctx.lineWidth = 1.6;
+    for (const p of pois) {
+      const [x, y] = toS(p.x, p.y);
+      ctx.beginPath();
+      ctx.arc(x, y, 4.2, 0, Math.PI * 2);
+      ctx.fillStyle = dark ? '#17181b' : '#ffffff';
+      ctx.fill();
+      ctx.strokeStyle = dark ? '#aeb4bd' : '#5c6370';
+      ctx.stroke();
+    }
+    // hover a marked point, or the tapped point: show its coordinates
+    let label: { x: number; y: number; gx: number; gy: number } | null = null;
+    const h = this.input.hoverWorld;
+    if (h) {
+      const [hx, hy] = this.toScreen(h[0], h[1]);
+      for (const p of pois) { const [x, y] = toS(p.x, p.y); if (Math.hypot(x - hx, y - hy) <= 9) { label = { x, y, gx: p.x, gy: p.y }; break; } }
+    }
+    const pr = this.graphProbe;
+    if (pr && pr.id === g.id) {
+      const [x, y] = toS(pr.x, pr.y);
+      ctx.beginPath();
+      ctx.arc(x, y, 5.5, 0, Math.PI * 2);
+      ctx.fillStyle = '#1971c2';
+      ctx.fill();
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      if (!label) label = { x, y, gx: pr.x, gy: pr.y };
+    }
+    if (label) {
+      const fmt = (v: number) => (Math.abs(v) < 1e-9 ? '0' : String(Math.round(v * 1000) / 1000).replace('-', '−'));
+      const text = `(${fmt(label.gx)}, ${fmt(label.gy)})`;
+      ctx.font = `600 12.5px ${FONT}`;
+      const w = ctx.measureText(text).width + 14;
+      let bx = label.x + 10, by = label.y - 30;
+      if (bx + w > this.vw - 4) bx = label.x - 10 - w;
+      if (by < 4) by = label.y + 10;
+      ctx.beginPath();
+      ctx.roundRect(bx, by, w, 22, 6);
+      ctx.fillStyle = dark ? '#e9ecef' : '#23262b';
+      ctx.fill();
+      ctx.fillStyle = dark ? '#16181d' : '#ffffff';
+      ctx.textBaseline = 'middle';
+      ctx.textAlign = 'left';
+      ctx.fillText(text, bx + 7, by + 11.5);
+    }
+    ctx.restore();
   }
 
   follow(sid: string | null) {
@@ -1106,6 +1293,7 @@ export class Engine {
   setTool(tool: ToolId) {
     const s = this.ui.get();
     this.input.cancelGesture();
+    if (s.crop) this.cancelCrop();
     if (s.textEdit) this.commitText(s.textEdit.text);
     if (tool !== 'select' && this.sel.size) this.setSelection([]);
     this.ui.set({ tool, popover: null });
@@ -1276,16 +1464,102 @@ export class Engine {
     this.commit(mine.map((id) => ({ kind: 'delete', id })));
   }
 
-  // ---------- reset for the next class ----------
-  private inkIds(page: Page): string[] {
-    return page.order.filter((id) => {
-      const o = page.objects[id];
-      return !!o && (o.type === 'stroke' || o.type === 'shape') && !o.locked;
+  // ---------- crop (non-destructive) ----------
+  /** The image being cropped, while the crop handles are shown. */
+  cropTarget(): ImageObj | null {
+    const c = this.ui.get().crop;
+    const o = c ? this.page.objects[c.id] : null;
+    return o?.type === 'image' ? o : null;
+  }
+
+  beginCrop() {
+    const o = this.selObjects()[0];
+    if (this.sel.size !== 1 || o?.type !== 'image' || o.locked) return;
+    this.input.cancelGesture();
+    this.ui.set({ crop: { id: o.id, rect: { ...cropOf(o) } }, popover: null });
+    this.invalidateIds(new Set([o.id]));
+    this.invalidateLive();
+  }
+
+  /** Crop handle positions in world space: 8 handles around the crop rectangle. */
+  cropHandles(o: ImageObj, r = this.ui.get().crop?.rect): { x: number; y: number; hx: number; hy: number }[] {
+    if (!r) return [];
+    return HANDLE_DIRS.map(([hx, hy]) => {
+      const [x, y] = fromImageFraction(o, r.x + ((hx + 1) / 2) * r.w, r.y + ((hy + 1) / 2) * r.h);
+      return { x, y, hx, hy };
     });
   }
-  private coveredTapeIds(page: Page): string[] {
-    return page.order.filter((id) => { const o = page.objects[id]; return o?.type === 'tape' && o.revealed; });
+
+  /** Confirms the crop: one update, undoable, synced. The image file is untouched. */
+  commitCrop() {
+    const c = this.ui.get().crop, o = this.cropTarget();
+    this.ui.set({ crop: null });
+    if (!c || !o) { this.invalidateLive(); return; }
+    const patch = cropPatch(o, c.rect);
+    const cur = cropOf(o);
+    const same = !o.crop ? patch.crop === null : !!patch.crop && JSON.stringify(patch.crop) === JSON.stringify({ x: cur.x, y: cur.y, w: cur.w, h: cur.h });
+    if (!same) this.commit([{ kind: 'update', id: o.id, patch }]);
+    this.invalidateIds(new Set([o.id]));
+    this.invalidateLive();
   }
+  cancelCrop() {
+    const c = this.ui.get().crop;
+    if (!c) return;
+    this.ui.set({ crop: null });
+    this.invalidateIds(new Set([c.id]));
+    this.invalidateLive();
+  }
+  /** Shows the whole image again (still needs Done, like any crop change). */
+  resetCrop() {
+    const c = this.ui.get().crop;
+    if (c) { this.ui.set({ crop: { ...c, rect: { x: 0, y: 0, w: 1, h: 1 } } }); this.invalidateLive(); }
+  }
+
+  private drawCrop(ctx: CanvasRenderingContext2D) {
+    const c = this.ui.get().crop, o = this.cropTarget();
+    if (!c || !o) return;
+    const img = this.env.getImage(o.src);
+    const f = fullFrame(o);
+    const r = c.rect;
+    ctx.save();
+    ctx.translate(f.cx, f.cy);
+    ctx.rotate(f.rot);
+    const left = -f.w / 2, top = -f.h / 2;
+    if (img) {
+      // the whole picture faded, the part that will stay at full strength
+      const iw = (img as { width: number }).width, ih = (img as { height: number }).height;
+      ctx.globalAlpha = 0.32;
+      ctx.drawImage(img, left, top, f.w, f.h);
+      ctx.globalAlpha = 1;
+      ctx.drawImage(img, r.x * iw, r.y * ih, r.w * iw, r.h * ih, left + r.x * f.w, top + r.y * f.h, r.w * f.w, r.h * f.h);
+    }
+    ctx.lineWidth = 1.5 / this.cam.zoom;
+    ctx.strokeStyle = '#1971c2';
+    ctx.setLineDash([6 / this.cam.zoom, 4 / this.cam.zoom]);
+    ctx.strokeRect(left, top, f.w, f.h);
+    ctx.setLineDash([]);
+    ctx.lineWidth = 2 / this.cam.zoom;
+    ctx.strokeRect(left + r.x * f.w, top + r.y * f.h, r.w * f.w, r.h * f.h);
+    ctx.restore();
+    // handles, in screen space
+    ctx.save();
+    ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    ctx.fillStyle = '#ffffff';
+    ctx.strokeStyle = '#1971c2';
+    ctx.lineWidth = 1.5;
+    for (const h of this.cropHandles(o, r)) {
+      const [x, y] = this.toScreen(h.x, h.y);
+      ctx.beginPath();
+      if (h.hx && h.hy) ctx.rect(x - 6, y - 6, 12, 12); else ctx.roundRect(x - 5, y - 5, 10, 10, 5);
+      ctx.fill();
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  // ---------- reset for the next class ----------
+  private inkIds(page: Page): string[] { return inkToClear(page); }
+  private coveredTapeIds(page: Page): string[] { return tapeToCover(page); }
 
   /** How much a notebook-wide reset would touch (for the confirm dialogs). */
   resetStats(): { inkPages: number; ink: number; tapePages: number; tape: number } {
@@ -1454,10 +1728,12 @@ export class Engine {
   // ---------- pages ----------
   private enterPage() {
     this.cam = this.cams.get(this.pageId) ?? { x: -40, y: -40, zoom: 1 };
+    this.graphProbe = null;
+    this.refreshAnimated();
     this.sel.clear();
     this.preview = null;
     this.editingId = null;
-    this.ui.set({ pageId: this.pageId, zoom: this.cam.zoom, sel: null, textEdit: null, graphInteract: false });
+    this.ui.set({ pageId: this.pageId, zoom: this.cam.zoom, sel: null, textEdit: null, graphInteract: false, crop: null });
     try { localStorage.setItem(`mathboard.page.${this.nb.id}`, this.pageId); } catch { /* ignore */ }
     this.sync?.emit('page', { pageId: this.pageId });
     this.rulerDirty = true;
@@ -1490,6 +1766,7 @@ export class Engine {
     const full = { ...op, opId: nanoid(10) } as PageOp;
     if (!applyPageOp(this.nb, full)) return false;
     this.sync.sendPageOp(full);
+    this.touchPageThumb(full);
     this.afterPageChange();
     return true;
   }

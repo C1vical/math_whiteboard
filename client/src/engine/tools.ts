@@ -7,8 +7,10 @@ import {
 import { round1, round2, straightPoints } from '../../../shared/ink';
 import { isScribble, recognizeShape, type Recognized } from '../../../shared/recognize';
 import { findSnap, knobPos, rulerContains, snapAngle, snapPoint, type Snap } from '../../../shared/ruler';
+import { dragCrop, toImageFraction } from '../../../shared/crop';
 import { spaceTargets } from '../../../shared/space';
-import { CLIP_PREFIX, type Axes, type BBox, type BoardObject, type Graph, type Shape, type Stroke, type StrokeStyle, type Tape } from '../../../shared/types';
+import { MultiTapDetector } from '../../../shared/touchTap';
+import { CLIP_PREFIX, type Axes, type BBox, type BoardObject, type Crop, type Graph, type ImageObj, type Shape, type Stroke, type StrokeStyle, type Tape } from '../../../shared/types';
 import type { Engine, OpBody } from './Engine';
 import { drawLiveStroke, drawShape, gridUnit, resolveColor } from './render';
 import { ERASER_SIZES, type ShapeTool } from './store';
@@ -341,9 +343,14 @@ class SelectGesture implements Gesture {
   private handle: { hx: number; hy: number } | null = null;
   private m: Mat = [1, 0, 0, 1, 0, 0];
   private clicked: BoardObject | null = null;
+  /** the only selected object when the press began (a tap on a selected graph reads coordinates) */
+  private onlySel: string | null;
+  private touch: boolean;
 
   constructor(private e: Engine, private input: Input, private start: Pt, ev: PointerEvent) {
     this.cur = start;
+    this.onlySel = e.sel.size === 1 ? [...e.sel][0] : null;
+    this.touch = ev.pointerType === 'touch';
     const z = e.cam.zoom;
     const grab = (ev.pointerType === 'touch' ? 18 : 11) / z;
     const f = e.selFrame();
@@ -445,6 +452,11 @@ class SelectGesture implements Gesture {
           e.commit(ops);
         }
       } else if (!this.moved && this.clicked) {
+        if (this.clicked.type === 'graph' && this.onlySel === this.clicked.id) {
+          e.setPreview(null);
+          e.probeGraph(this.start.x, this.start.y, this.touch ? 18 : 10);
+          return;
+        }
         // double-click / double-tap a text box to edit it
         const now = performance.now();
         const last = this.input.lastTap;
@@ -766,11 +778,14 @@ class GraphPanGesture implements Gesture {
   kind = 'graph';
   private win: [number, number, number, number];
   private pending: Record<string, number> | null = null;
+  private moved = false;
   constructor(private e: Engine, private g: Graph, private start: Pt) {
     this.win = [g.xMin, g.xMax, g.yMin, g.yMax];
   }
   move(pts: Pt[]) {
     const p = pts[pts.length - 1], g = this.g;
+    if (!this.moved && Math.hypot(p.sx - this.start.sx, p.sy - this.start.sy) < 4) return;
+    this.moved = true;
     const rot = -(g.rotation || 0);
     const wx = p.x - this.start.x, wy = p.y - this.start.y;
     const lx = wx * Math.cos(rot) - wy * Math.sin(rot), ly = wx * Math.sin(rot) + wy * Math.cos(rot);
@@ -782,8 +797,43 @@ class GraphPanGesture implements Gesture {
     this.e.commit([{ kind: 'update', id: this.g.id, patch: this.pending }], { undo: false });
     this.pending = null;
   }
-  up() { this.frame(); }
+  up() {
+    this.frame();
+    if (!this.moved) this.e.probeGraph(this.start.x, this.start.y, 12);
+  }
   cancel() { /* keep what was applied */ }
+}
+
+// =====================================================================
+// Crop: drag the handles (or the inside) of the crop rectangle
+// =====================================================================
+class CropGesture implements Gesture {
+  kind = 'crop';
+  private start: Crop;
+  private h: { hx: number; hy: number } | null = null;
+  private u0: number; private v0: number;
+  constructor(private e: Engine, private o: ImageObj, p: Pt, ev: PointerEvent) {
+    this.start = { ...e.ui.get().crop!.rect };
+    const grab = ev.pointerType === 'touch' ? 22 : 12;
+    for (const h of e.cropHandles(o, this.start)) {
+      const [x, y] = e.toScreen(h.x, h.y);
+      if (Math.hypot(x - p.sx, y - p.sy) <= grab) { this.h = h; break; }
+    }
+    [this.u0, this.v0] = toImageFraction(o, p.x, p.y);
+    const r = this.start;
+    const inside = this.u0 >= r.x && this.u0 <= r.x + r.w && this.v0 >= r.y && this.v0 <= r.y + r.h;
+    if (!this.h && inside) this.h = { hx: 0, hy: 0 }; // drag the whole crop
+  }
+  move(pts: Pt[]) {
+    if (!this.h) return;
+    const p = pts[pts.length - 1];
+    const [u, v] = toImageFraction(this.o, p.x, p.y);
+    const rect = dragCrop(this.start, this.h.hx, this.h.hy, u, v, u - this.u0, v - this.v0);
+    this.e.ui.set((st) => (st.crop ? { crop: { ...st.crop, rect } } : {}));
+    this.e.invalidateLive();
+  }
+  up() { /* the crop is applied with Done */ }
+  cancel() { this.e.ui.set((st) => (st.crop ? { crop: { ...st.crop, rect: this.start } } : {})); this.e.invalidateLive(); }
 }
 
 // =====================================================================
@@ -804,6 +854,9 @@ export class Input {
   private pinch: { d0: number; a0: number; zoom0: number; wx: number; wy: number; ruler: { angle: number; x: number; y: number; cx: number; cy: number } | null } | null = null;
   private spaceDown = false;
   private laserKey: { t: number } | null = null;
+  /** two-finger tap = undo, three-finger tap = redo */
+  private taps = new MultiTapDetector();
+  private lastPenAt = -1e9;
   private cursorDirty = false;
   private cursorSentAt = 0;
   private rulerRaw: number | null = null;
@@ -861,6 +914,7 @@ export class Input {
     this.pointerId = -1;
     this.down = null;
     this.e.invalidateLive();
+    this.e.gestureEnded();
   }
 
   // ---------- pointer ----------
@@ -875,12 +929,15 @@ export class Input {
     const te = e.ui.get().textEdit;
     if (te) e.commitText(te.text);
     e.stopFollow();
-    if (ev.pointerType === 'pen') this.sawPen = true;
+    if (ev.pointerType === 'pen') { this.sawPen = true; this.lastPenAt = performance.now(); this.taps.spoil(); }
     const p = this.pt(ev);
 
     if (ev.pointerType === 'touch') {
       this.hover = null;
       this.touches.set(ev.pointerId, { sx: p.sx, sy: p.sy });
+      this.taps.start(ev.pointerId, p.sx, p.sy, performance.now());
+      // a palm resting while the pen writes is not a gesture
+      if (this.gesture && !this.gestureTouch) this.taps.spoil();
       if (this.touches.size === 2) {
         if (this.gesture && this.gestureTouch) this.cancelGesture();
         this.startPinch();
@@ -909,7 +966,7 @@ export class Input {
     const tool = this.activeTool();
     // a tap on a tape reveals / hides it instead of doing the tool's normal thing
     let tape: Tape | null = null;
-    if (g.kind !== 'ruler' && g.kind !== 'eraser') {
+    if (g.kind !== 'ruler' && g.kind !== 'eraser' && g.kind !== 'crop') {
       const t = this.tapeAt(p);
       if (t && (tool === 'select' || tool === 'tape' || tool === 'laser' || g.kind === 'pan' || ((tool === 'pen' || tool === 'highlighter') && !t.revealed))) tape = t;
     }
@@ -940,6 +997,8 @@ export class Input {
     if (pen && ((ev.buttons & 32) || ev.button === 5)) return new EraserGesture(e, p);
     if (pen && ((ev.buttons & 2) || ev.button === 2)) return new SelectGesture(e, this, p, ev);
 
+    const crop = e.cropTarget();
+    if (crop) return new CropGesture(e, crop, p, ev);
     const tool = this.activeTool();
     const penLike = tool === 'pen' || tool === 'highlighter';
     const r = ui.ruler;
@@ -986,9 +1045,11 @@ export class Input {
 
   private onMove = (ev: PointerEvent) => {
     const rect = this.el.getBoundingClientRect();
+    if (ev.pointerType === 'pen') this.lastPenAt = performance.now();
     if (ev.pointerType === 'touch' && this.touches.has(ev.pointerId)) {
       const p = this.pt(ev, rect);
       this.touches.set(ev.pointerId, { sx: p.sx, sy: p.sy });
+      this.taps.move(ev.pointerId, p.sx, p.sy);
       if (this.pinch && this.touches.size >= 2) { this.movePinch(); return; }
     }
     if (this.gesture && ev.pointerId === this.pointerId) {
@@ -1012,9 +1073,12 @@ export class Input {
   }
 
   private onUp = (ev: PointerEvent) => {
+    if (ev.pointerType === 'pen') this.lastPenAt = performance.now();
     if (ev.pointerType === 'touch') {
       this.touches.delete(ev.pointerId);
       if (this.touches.size < 2) this.pinch = null;
+      const tap = this.taps.end(ev.pointerId, performance.now());
+      if (tap && performance.now() - this.lastPenAt > 500) this.multiTap(tap);
     }
     if (!this.gesture || ev.pointerId !== this.pointerId) return;
     const g = this.gesture, d = this.down;
@@ -1034,12 +1098,25 @@ export class Input {
       console.error('[input] up', err);
     }
     this.e.invalidateLive();
+    this.e.gestureEnded();
   };
+
+  /** Two-finger tap: undo. Three-finger tap: redo. Nothing is drawn and the view does not move. */
+  private multiTap(kind: 'undo' | 'redo') {
+    const e = this.e;
+    if (this.gesture) this.cancelGesture();
+    if (e.replay || e.ui.get().crop) return;
+    const s = e.ui.get();
+    if (kind === 'undo' ? !s.canUndo : !s.canRedo) { e.toast(kind === 'undo' ? 'Nothing to undo' : 'Nothing to redo', 'info', { ms: 1200 }); return; }
+    if (kind === 'undo') e.undo(); else e.redo();
+    e.toast(kind === 'undo' ? 'Undo' : 'Redo', 'info', { ms: 900 });
+  }
 
   private onCancel = (ev: PointerEvent) => {
     if (ev.pointerType === 'touch') {
       this.touches.delete(ev.pointerId);
       if (this.touches.size < 2) this.pinch = null;
+      this.taps.cancel(ev.pointerId);
     }
     if (this.gesture && ev.pointerId === this.pointerId) {
       // a stroke interrupted by the system is kept rather than lost
@@ -1049,6 +1126,7 @@ export class Input {
       this.down = null;
       try { if (g.kind === 'pen') g.up(ev); else g.cancel(); } catch (err) { console.error(err); }
       this.e.invalidateLive();
+      this.e.gestureEnded();
     }
   };
 
@@ -1246,6 +1324,11 @@ export class Input {
 
     if (ui.dialog || ui.restore) {
       if (key === 'Escape' && ui.dialog) { e.ui.set({ dialog: null }); done(); }
+      return;
+    }
+    if (ui.crop && !mod) {
+      if (key === 'Enter') { e.commitCrop(); done(); }
+      else if (key === 'Escape') { if (this.gesture) this.cancelGesture(); else e.cancelCrop(); done(); }
       return;
     }
     if (mod) {

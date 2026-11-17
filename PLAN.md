@@ -18,7 +18,10 @@ shared/   pure TypeScript used by client, server and tests
   space.ts      insert/remove-space op builder
   imageSize.ts  downscale sizing math, multi-image layout
   exportLayout.ts  PDF sheet layout (fit / Letter / A4, splitting tall pages), background geometry
-  timer.ts      shared countdown state machine
+  timer.ts      shared countdown state machine, custom-time parsing
+  reset.ts      what "reset for the next class" touches on a page
+  crop.ts       non-destructive image crop maths (frame <-> source fractions, handle drags)
+  touchTap.ts   two- / three-finger tap detector (never fires for a pinch or pan)
 server/   Express + Socket.IO; one process serves client, API, uploads, websockets
   app.ts        createApp(): HTTP routes, socket handlers, presence, rate limits, upload sweep
   store.ts      notebooks in memory (evicted when idle), salvage on load, per-page persistence,
@@ -64,6 +67,17 @@ does not see it). The committed layer therefore repaints as little as possible:
 maintained bitmap with a fresh full repaint after pans, strokes, erasing, selection
 moves, undo and zoom (differences are limited to anti-aliasing on a few seam pixels).
 
+### Page thumbnails
+`engine/thumbs.ts` draws a 172×104 preview of each page for the sidebar, entirely off the drawing
+path: only while the sidebar is shown, in `requestIdleCallback` time (a 50 ms timer where that is
+missing), 0.7 s after the last edit to a page, never while a pointer gesture is in progress, in slices
+of at most 5 ms, and cached per page until that page changes. The thumbnail canvas is a CPU canvas and
+each slice ends by reading one pixel, so the deferred canvas raster happens inside the slice instead of
+all at once when the sidebar copies the thumbnail (without that, a 5,000-stroke page caused 70–150 ms
+frames). Measured while drawing on a 5,000-stroke page in headless Chrome (6 s of strokes with
+pauses, `tests/browser/final.mjs`): sidebar closed p95 17.2 ms / max 57.7 ms; sidebar open
+p95 17.1 ms / max 18.1 ms, with 73 ms of thumbnail work spread over idle time.
+
 ### Ink
 `shared/ink.ts` maps (pen type, size, stabilization) → perfect-freehand options.
 The local live stroke, remote previews and committed strokes all call it with
@@ -106,6 +120,12 @@ As in the spec (section 6), with small additions:
 - Optional fields are cleared with `null` in update patches (JSON has no `undefined`).
 - `Notebook.title` is shown and edited in the top bar (`notebookTitle` page op).
 - Every field added later is optional, so older files still validate.
+- `ImageObj.crop {x, y, w, h}`: the visible part of the source image, as fractions of it; the object's
+  `x/y/w/h` are the visible frame. Rendering, hit-testing, bounds, export and duplicate all use the
+  frame; the uploaded file is never changed, and `crop: null` shows the whole image again.
+- `Graph.angle` ('deg', otherwise radians), `Graph.piTicks`, `GraphSlider.play {t0, v0, dir}` (a
+  playing slider is a function of the server clock, so every screen shows the same value without a
+  stream of updates). `Axes.grid`, `Axes.xLabel`, `Axes.yLabel`, `Axes.piTicks`.
 
 ## Socket protocol
 Client → server: `join` (ack: snapshot, countdown, server clock), `ops`, `pageop`, `live:start`,
@@ -114,6 +134,12 @@ Client → server: `join` (ack: snapshot, countdown, server clock), `ops`, `page
 (which page I am on), `rename` (my display name), `summon` (bring everyone to my page and view, once),
 `timer` (shared countdown actions), `backup` (keep a server copy first), `restore` (upload a full
 snapshot; the server backs up the current one first).
+
+The countdown (`TimerState`: duration, remaining, `endsAt` on the server clock, position) lives in
+the room in memory only: never written to disk, kept across a room eviction like the seen opIds, and
+sent with the join ack together with the server clock, so a late joiner shows the right time.
+`summon` is relayed once; the receiver waits until its own pointer gesture has ended before it moves,
+and it does not start a lasting follow.
 
 Server → client: `ops {seq, ops, from, t}` to others and `ack {seq, opIds, t}` to the
 sender; `pageop`; `presence`; `snapshot` (after restore); `saved`; relayed live events
@@ -137,6 +163,23 @@ not applied or relayed but is still acknowledged, so the sender's queue drains.
 - Restart safety: the client caches the notebook and image blobs in IndexedDB. If the
   server copy is empty or older, the user is asked to restore from the device.
 
+## Graphs
+`shared/graph.ts` keeps the whitelist evaluator: only the listed functions and constants can run,
+whatever a collaborator types. Degrees mode wraps trig input and inverse-trig output. A trailing `{…}`
+(one or two inequalities, or a chained `a <= x <= b`) becomes a mask: masked samples are NaN, so the
+curve stops there. Relations in x and y that are not solved for y (`x^2 + y^2 = 25`) are traced with
+marching squares; a sign change through a pole is not taken as a crossing, so there are no stray
+segments. Points of interest (x-intercepts, the y-intercept, turning points, intersections of visible
+curves) are found from sign changes refined by bisection; they are drawn on the live layer while the
+graph is selected and are never stored. Tapping a curve shows the nearest point's coordinates.
+
+## Touch gestures and keys
+`shared/touchTap.ts`: all fingers down within 200 ms, lifted within 350 ms of the first, none moved
+more than 12 px, no pen input meanwhile → two fingers undo, three redo. A pinch or pan moves the
+fingers, so it never counts, and taps never reach the drawing tools. Holding L for more than 250 ms
+sets `heldTool`, which the input layer uses instead of the chosen tool until the key is released; a
+quick press selects the laser as before.
+
 ## Undo
 Every local commit computes inverse ops against the current state
 (`applyWithInverse`). Undo stacks are per user per page (500 entries); undo/redo send
@@ -150,8 +193,9 @@ React renders only the chrome and talks to the engine through a small external s
 - `Board.tsx` — mounts the engine; text editor overlay, zoom controls, pager, replay bar,
   follow banner, toasts, tooltips
 - `Toolbar.tsx` — tools, pen favourites and their popovers, focus-mode bar
-- `TopRight.tsx` — presence chips (click to follow), connection / save status, Share, ☰ menu
-- `Sidebar.tsx` — pages list (add, rename, duplicate, delete, drag to reorder)
+- `TopRight.tsx` — presence chips (click to follow), *bring everyone here*, connection / save status, Share, ☰ menu
+- `Sidebar.tsx` — pages list with live thumbnails (add, rename, duplicate, delete, drag to reorder)
+- `Timer.tsx` — the shared countdown widget, and its presets in the Insert flyout
 - `SelectionBar.tsx` — floating actions for the selection
 - `Inspector.tsx` — graph panel (expressions, sliders, window) and axes panel
 - `Dialogs.tsx` — shortcuts, settings (incl. my name), clear / reset confirms, export options, device
@@ -194,7 +238,8 @@ All four are implemented and verified end to end in two browser sessions
 Graph, axes, tape and image are in one *Insert* flyout; ruler and protractor share a button. With
 more than ten pens they are narrower, the status shows icons only below 1500 px (the words appear
 in a banner over the board), presence chips overlap, and the board name gets 80 px (full name in
-its tooltip). Checked with 15 pens, three people and the sidebar open (tests/browser/final.mjs).
+its tooltip). The *bring everyone here* button sits after the chips; to make room, with more than
+ten pens each is 26 px wide and the top-right items are 3 px apart. Checked with 15 pens, three people and the sidebar open (tests/browser/final.mjs).
 
 ## Not verified here
 - Real pen hardware, iPad Safari and Firefox: pointer handling was exercised with

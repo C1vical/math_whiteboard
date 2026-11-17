@@ -179,7 +179,12 @@ function drawImageObj(ctx: CanvasRenderingContext2D, o: ImageObj, env: RenderEnv
   withFrame(ctx, frameOf(o)!, (x, y, w, h) => {
     if (img) {
       ctx.imageSmoothingQuality = 'high';
-      ctx.drawImage(img, x, y, w, h);
+      const c = o.crop;
+      if (c) {
+        // only the cropped part of the source is shown; the file itself is never changed
+        const iw = (img as { width: number }).width, ih = (img as { height: number }).height;
+        ctx.drawImage(img, c.x * iw, c.y * ih, c.w * iw, c.h * ih, x, y, w, h);
+      } else ctx.drawImage(img, x, y, w, h);
       return;
     }
     const failed = env.imageState?.(o.src) === 'error';

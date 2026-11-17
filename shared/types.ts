@@ -73,7 +73,11 @@ export interface TextObj extends Base {
 }
 
 export interface GraphExpr { id: string; text: string; color: string; visible: boolean }
-export interface GraphSlider { name: string; min: number; max: number; step: number; value: number }
+export interface GraphSlider {
+  name: string; min: number; max: number; step: number; value: number;
+  /** playing: the value bounces between min and max, as a function of the server clock (see shared/graph.ts) */
+  play?: { t0: number; v0: number; dir: 1 | -1 } | null;
+}
 
 export interface Graph extends Base {
   type: 'graph';

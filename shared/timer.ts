@@ -19,7 +19,7 @@ export function timerReduce(t: TimerState | null, a: TimerAction, now: number): 
   switch (a.action) {
     case 'show': {
       const d = Math.max(1000, Math.min(MAX_TIMER_MS, Math.round(a.durationMs)));
-      return { durationMs: d, remainingMs: d, endsAt: null, x: t?.x ?? 0.5, y: t?.y ?? 0.1 };
+      return { durationMs: d, remainingMs: d, endsAt: null, x: t?.x ?? 0, y: t?.y ?? 0 }; // top left of the board (no panels there) until someone moves it
     }
     case 'start': {
       if (!t || timerRunning(t, now)) return undefined;
@@ -46,4 +46,27 @@ export function formatTimer(ms: number): string {
   const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
   const two = (n: number) => String(n).padStart(2, '0');
   return h ? `${h}:${two(m)}:${two(sec)}` : `${m}:${two(sec)}`;
+}
+
+/**
+ * A custom countdown typed by a teacher: "5" (minutes), "2:30" (m:ss), "1:05:00" (h:mm:ss),
+ * "90s" or "1.5" (minutes). Returns milliseconds, or null when it is not a usable time.
+ */
+export function parseTimerInput(text: string): number | null {
+  const s = text.trim().toLowerCase().replace(/\s+/g, '');
+  if (!s) return null;
+  let ms: number;
+  const unit = /^(\d+(?:\.\d+)?)(s|sec|m|min|h|hr)$/.exec(s);
+  if (unit) {
+    const v = Number(unit[1]);
+    ms = v * (unit[2].startsWith('s') ? 1000 : unit[2].startsWith('m') ? 60000 : 3600000);
+  } else if (/^\d+(?:\.\d+)?$/.test(s)) {
+    ms = Number(s) * 60000;
+  } else if (/^\d+(?::\d{1,2}){1,2}$/.test(s)) {
+    const parts = s.split(':').map(Number);
+    if (parts.slice(1).some((p) => p >= 60)) return null;
+    ms = parts.reduce((acc, p) => acc * 60 + p, 0) * 1000;
+  } else return null;
+  ms = Math.round(ms);
+  return ms >= 1000 && ms <= MAX_TIMER_MS ? ms : null;
 }

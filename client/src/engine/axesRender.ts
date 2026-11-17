@@ -1,4 +1,4 @@
-import { formatTick, niceStep } from '../../../shared/ticks';
+import { formatPi, formatTick, niceStep, piStep } from '../../../shared/ticks';
 import type { Axes } from '../../../shared/types';
 import type { RenderEnv } from './render';
 
@@ -24,6 +24,19 @@ function ticks(min: number, max: number, step: number): { values: number[]; step
   return { values, step: s };
 }
 
+/** x ticks: the axes' own step, or multiples of π (the step is rounded to a fraction of π). */
+function xTicks(a: Axes) {
+  if (!a.piTicks) { const t = ticks(a.xMin, a.xMax, a.xStep); return { ...t, label: (v: number) => formatTick(v, t.step) }; }
+  let step = Number.isFinite(a.xStep) && a.xStep > 0 ? a.xStep : piStep(a.xMax - a.xMin, 8);
+  const k = step / Math.PI;
+  // snap to the nearest simple fraction or multiple of π
+  step = (k >= 1 ? Math.round(k) : 1 / Math.max(1, Math.round(1 / k))) * Math.PI;
+  const t = ticks(a.xMin, a.xMax, step);
+  return { ...t, label: (v: number) => formatPi(v, t.step) };
+}
+
+const label = (s: string | null | undefined, fallback: string) => (s ?? fallback).trim();
+
 /** Hand-drawable coordinate axes / number line (transparent, so ink goes on top). */
 export function drawAxes(ctx: CanvasRenderingContext2D, a: Axes, x: number, y: number, w: number, h: number, env: RenderEnv) {
   const color = env.dark ? '#f1f3f5' : '#16181d';
@@ -44,13 +57,20 @@ export function drawAxes(ctx: CanvasRenderingContext2D, a: Axes, x: number, y: n
     // keep ticks clear of the arrow heads
     const pad = 22;
     const fx = (v: number) => x + pad + ((v - a.xMin) / (a.xMax - a.xMin)) * (w - 2 * pad);
-    const t = ticks(a.xMin, a.xMax, a.xStep);
+    const t = xTicks(a);
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
     ctx.beginPath();
     for (const v of t.values) { ctx.moveTo(fx(v), cy - tick - 1); ctx.lineTo(fx(v), cy + tick + 1); }
     ctx.stroke();
-    if (a.showNumbers) for (const v of t.values) ctx.fillText(formatTick(v, t.step), fx(v), cy + tick + 5);
+    if (a.showNumbers) for (const v of t.values) ctx.fillText(t.label(v), fx(v), cy + tick + 5);
+    const xl = label(a.xLabel, '');
+    if (xl) {
+      ctx.font = `italic 15px ${FONT}`;
+      ctx.textAlign = 'right';
+      ctx.textBaseline = 'bottom';
+      ctx.fillText(xl, x + w, cy - tick - 4);
+    }
     ctx.restore();
     return;
   }
@@ -60,6 +80,18 @@ export function drawAxes(ctx: CanvasRenderingContext2D, a: Axes, x: number, y: n
   const fy = (v: number) => y + h - ((v - a.yMin) / (a.yMax - a.yMin)) * h;
   const ax = fx(Math.max(a.xMin, Math.min(a.xMax, 0))), ay = fy(Math.max(a.yMin, Math.min(a.yMax, 0)));
   const ext = 14; // axes extend a little past the last tick, ending in arrows
+  const tx = xTicks(a), ty = ticks(a.yMin, a.yMax, a.yStep);
+  if (a.grid) {
+    // light grid lines inside the axes box, one per tick
+    ctx.save();
+    ctx.strokeStyle = env.dark ? 'rgba(255,255,255,0.13)' : 'rgba(40,70,120,0.16)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (const v of tx.values) { ctx.moveTo(fx(v), y); ctx.lineTo(fx(v), y + h); }
+    for (const v of ty.values) { ctx.moveTo(x, fy(v)); ctx.lineTo(x + w, fy(v)); }
+    ctx.stroke();
+    ctx.restore();
+  }
   ctx.beginPath();
   ctx.moveTo(x - ext, ay); ctx.lineTo(x + w + ext, ay);
   ctx.moveTo(ax, y - ext); ctx.lineTo(ax, y + h + ext);
@@ -67,7 +99,6 @@ export function drawAxes(ctx: CanvasRenderingContext2D, a: Axes, x: number, y: n
   arrow(ctx, x + w + ext, ay, 0, head); arrow(ctx, x - ext, ay, Math.PI, head);
   arrow(ctx, ax, y - ext, -Math.PI / 2, head); arrow(ctx, ax, y + h + ext, Math.PI / 2, head);
 
-  const tx = ticks(a.xMin, a.xMax, a.xStep), ty = ticks(a.yMin, a.yMax, a.yStep);
   ctx.lineWidth = 1.5;
   ctx.beginPath();
   for (const v of tx.values) if (v !== 0 || ax !== fx(0)) { ctx.moveTo(fx(v), ay - tick); ctx.lineTo(fx(v), ay + tick); }
@@ -76,10 +107,24 @@ export function drawAxes(ctx: CanvasRenderingContext2D, a: Axes, x: number, y: n
   if (a.showNumbers) {
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
-    for (const v of tx.values) if (v !== 0) ctx.fillText(formatTick(v, tx.step), fx(v), ay + tick + 3);
+    for (const v of tx.values) if (v !== 0) ctx.fillText(tx.label(v), fx(v), ay + tick + 3);
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
     for (const v of ty.values) if (v !== 0) ctx.fillText(formatTick(v, ty.step), ax - tick - 4, fy(v));
+  }
+  // axis labels at the arrow ends (kept inside the box's width so repaints cover them)
+  ctx.font = `italic 15px ${FONT}`;
+  const xl = label(a.xLabel, 'x'), yl = label(a.yLabel, 'y');
+  if (xl) {
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'bottom';
+    ctx.fillText(xl, x + w + ext, ay - 7);
+  }
+  if (yl) {
+    const right = ax < x + w / 2;
+    ctx.textAlign = right ? 'left' : 'right';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(yl, ax + (right ? 9 : -9), y - ext + 4);
   }
   ctx.restore();
 }

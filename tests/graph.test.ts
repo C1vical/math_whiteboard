@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { compileGraph, fitYRange, formatTick, niceStep, preprocess, sampleFunction } from '../shared/graph';
+import {
+  compileGraph, contourImplicit, findPOIs, findRoots, findTurningPoints, fitYRange, formatCoord, formatTick, nearestCurvePoint, niceStep, preprocess,
+  sampleFunction, sliderDirAt, sliderValueAt, SLIDER_SWEEP_MS, splitRestriction,
+} from '../shared/graph';
+import { formatPi, piStep } from '../shared/ticks';
 
 const one = (text: string, sliders: Record<string, number> = {}) => compileGraph([{ id: 'e', text }], sliders).items[0];
 const fn = (text: string, sliders: Record<string, number> = {}) => {
@@ -180,5 +184,233 @@ describe('graph sampler', () => {
     expect(r[1]).toBeGreaterThan(4);
     expect(r[1]).toBeLessThan(6);
     expect(fitYRange(g, new Set(), -2, 2)).toBeNull();
+  });
+});
+
+// ---------- graph upgrades (final round) ----------
+
+const deg = (text: string) => {
+  const it = compileGraph([{ id: 'e', text }], {}, { angle: 'deg' }).items[0];
+  if (it.kind !== 'fn') throw new Error(`${text} → ${it.kind}: ${it.error}`);
+  return it.fn!;
+};
+
+describe('degrees or radians', () => {
+  it('trig functions take degrees, inverse trig answers in degrees', () => {
+    expect(deg('y = sin(x)')(90)).toBeCloseTo(1);
+    expect(deg('y = sin(x)')(180)).toBe(0);
+    expect(deg('y = cos(x)')(60)).toBeCloseTo(0.5);
+    expect(deg('y = tan(x)')(45)).toBeCloseTo(1);
+    expect(deg('y = asin(x)')(1)).toBeCloseTo(90);
+    expect(deg('y = arctan(x)')(1)).toBeCloseTo(45);
+    expect(deg('y = sec(x)')(60)).toBeCloseTo(2);
+    // user functions see the same mode, and radians stay the default
+    const g = compileGraph([{ id: 'a', text: 'f(x) = sin(x)' }, { id: 'b', text: 'y = 2f(x)' }], {}, { angle: 'deg' });
+    expect(g.items[1].fn!(30)).toBeCloseTo(1);
+    expect(fn('y = sin(x)')(Math.PI / 2)).toBeCloseTo(1);
+    expect(deg('y = x^2')(3)).toBe(9); // non-trig functions are unaffected
+    // tan(90°) is an asymptote: no connecting line
+    expect(crosses(sampleFunction(deg('y = tan(x)'), -360, 360, -10, 10), 90)).toBe(false);
+  });
+});
+
+describe('domain restrictions', () => {
+  it('y = x^2 {x > 0} and y = 2x + 1 {-1 <= x <= 3}', () => {
+    const f = fn('y = x^2 {x > 0}');
+    expect(f(2)).toBe(4);
+    expect(f(-2)).toBeNaN();
+    const p = sampleFunction(f, -10, 10, -10, 10);
+    expect(p.length).toBe(1);
+    expect(p[0][0]).toBeGreaterThan(0);
+    expect(p[0][0]).toBeLessThan(1e-3);
+    const g = fn('y = 2x + 1 {-1 <= x <= 3}');
+    expect(g(-1)).toBe(-1);
+    expect(g(3)).toBe(7);
+    expect(g(3.01)).toBeNaN();
+    const q = sampleFunction(g, -10, 10, -10, 10);
+    expect(q.length).toBe(1);
+    expect(q[0][0]).toBeCloseTo(-1, 4);
+    expect(q[0][q[0].length - 2]).toBeCloseTo(3, 4);
+  });
+
+  it('several conditions, y conditions, sliders in bounds, and the other kinds', () => {
+    expect(fn('y = x {x > 0, x < 2}')(1)).toBe(1);
+    expect(fn('y = x {x > 0, x < 2}')(3)).toBeNaN();
+    expect(fn('y = x^2 - 4 {y < 0}')(1)).toBe(-3);
+    expect(fn('y = x^2 - 4 {y < 0}')(3)).toBeNaN();
+    const s = compileGraph([{ id: 'e', text: 'y = x {x < k}' }], { k: 2 });
+    expect(s.params).toEqual(['k']);
+    expect(s.items[0].fn!(1.5)).toBe(1.5);
+    expect(s.items[0].fn!(2.5)).toBeNaN();
+    expect(one('x = 3 {0 < y < 5}')).toMatchObject({ kind: 'vline', value: 3 });
+    expect(one('x = 3 {0 < y < 5}').mask!(3, 6)).toBe(false);
+    expect(one('y >= x {x > 0}').fn!(-1)).toBeNaN(); // shading only where allowed
+    expect(splitRestriction('y = x {x > 1}')).toEqual({ body: 'y = x', cond: 'x > 1' });
+    expect(splitRestriction('y = x')).toEqual({ body: 'y = x', cond: null });
+  });
+
+  it('bad restrictions are reported, never thrown', () => {
+    for (const text of ['y = x {', 'y = x {}', 'y = x {x}', 'y = x {x >}', 'y = x {x > 0} {x < 1}', 'y = x {foo(x) > 1}', 'y = {x > 0} x', 'f(x) = x {x > 0}']) {
+      let item;
+      expect(() => { item = one(text); }, text).not.toThrow();
+      expect(item!.kind, text).toBe('error');
+    }
+  });
+});
+
+describe('implicit relations', () => {
+  const imp = (text: string) => {
+    const it = one(text);
+    if (it.kind !== 'implicit') throw new Error(`${text} → ${it.kind}: ${it.error}`);
+    return it.F!;
+  };
+  const near = (paths: number[][], test: (x: number, y: number) => boolean) => paths.every((p) => {
+    for (let i = 0; i < p.length; i += 2) if (!test(p[i], p[i + 1])) return false;
+    return true;
+  });
+
+  it('x^2 + y^2 = 25 is a circle of radius 5', () => {
+    const paths = contourImplicit(imp('x^2 + y^2 = 25'), -10, 10, -10, 10, 160, 160);
+    expect(paths.length).toBe(1); // one closed loop, no stray pieces
+    const p = paths[0];
+    expect(Math.hypot(p[0] - p[p.length - 2], p[1] - p[p.length - 1])).toBeLessThan(1e-9); // closed
+    expect(near(paths, (x, y) => Math.abs(Math.hypot(x, y) - 5) < 0.02)).toBe(true);
+    expect(p.length / 2).toBeGreaterThan(100);
+  });
+
+  it('x^2/9 + y^2/4 = 1 is an ellipse; other implicit curves and sliders work', () => {
+    const paths = contourImplicit(imp('x^2/9 + y^2/4 = 1'), -10, 10, -10, 10, 160, 160);
+    expect(paths.length).toBe(1);
+    expect(near(paths, (x, y) => Math.abs((x * x) / 9 + (y * y) / 4 - 1) < 0.02)).toBe(true);
+    const xs = paths[0].filter((_, i) => i % 2 === 0);
+    expect(Math.max(...xs)).toBeCloseTo(3, 1);
+    const hyper = contourImplicit(imp('x y = 1'), -5, 5, -5, 5, 120, 120);
+    expect(hyper.length).toBe(2); // two branches
+    expect(near(hyper, (x, y) => Math.abs(x * y - 1) < 0.05)).toBe(true);
+    const g = compileGraph([{ id: 'e', text: 'x^2 + y^2 = r^2' }], { r: 3 });
+    expect(g.params).toEqual(['r']);
+    expect(near(contourImplicit(g.items[0].F!, -5, 5, -5, 5), (x, y) => Math.abs(Math.hypot(x, y) - 3) < 0.03)).toBe(true);
+  });
+
+  it('no stray segments across poles', () => {
+    // 1/x = y has a pole along x = 0: F changes sign there for every y, but that is not a crossing
+    const paths = contourImplicit(imp('1/x = y + 0'), -5, 5, -5, 5, 100, 100);
+    expect(paths.length).toBeGreaterThan(0);
+    expect(near(paths, (x, y) => Math.abs(x * y - 1) < 0.1)).toBe(true);
+    const tanPaths = contourImplicit(imp('y - tan(x) = 0'), -5, 5, -5, 5, 100, 100);
+    for (const pole of [-1.5, -0.5, 0.5, 1.5].map((k) => k * Math.PI)) expect(crosses(tanPaths, pole), `x = ${pole}`).toBe(false);
+    expect(near(tanPaths, (x, y) => Math.abs(y - Math.tan(x)) < 0.2)).toBe(true);
+  });
+
+  it('a restriction clips the curve; bad input never crashes', () => {
+    const half = contourImplicit(imp('x^2 + y^2 = 25 {y > 0}'), -10, 10, -10, 10);
+    expect(half.length).toBeGreaterThan(0);
+    expect(near(half, (_x, y) => y > -0.2)).toBe(true);
+    for (const text of ['x^2 + y^2 = ', 'x^2 + y^2 < 25', '2 = 3', 'q + r = 5', 'x^2 + y^2 = foo(', 'x y = sqrt(']) {
+      let item;
+      expect(() => { item = one(text); }, text).not.toThrow();
+      expect(item!.kind, text).toBe('error');
+    }
+    expect(compileGraph([{ id: 'e', text: 'q + r = 5' }]).params).toEqual([]); // no stray sliders
+    expect(contourImplicit(() => NaN, -1, 1, -1, 1)).toEqual([]);
+    expect(contourImplicit(() => { throw new Error('boom'); }, -1, 1, -1, 1)).toEqual([]);
+    expect(contourImplicit(imp('x^2 + y^2 = 25'), 1, 1, -1, 1)).toEqual([]);
+  });
+});
+
+describe('points of interest', () => {
+  const pois = (texts: string[], win = [-10, 10, -10, 10]) => {
+    const c = compileGraph(texts.map((text, i) => ({ id: String(i), text })));
+    return findPOIs(c, new Set(texts.map((_, i) => String(i))), win[0], win[1], win[2], win[3]);
+  };
+  const has = (ps: { x: number; y: number; kind: string }[], x: number, y: number, kind?: string) =>
+    ps.some((p) => Math.abs(p.x - x) < 1e-6 && Math.abs(p.y - y) < 1e-6 && (!kind || p.kind === kind));
+
+  it('x-intercepts, y-intercept and turning points', () => {
+    const ps = pois(['y = x^2 - 4']);
+    expect(has(ps, -2, 0, 'xint') && has(ps, 2, 0, 'xint')).toBe(true);
+    expect(has(ps, 0, -4)).toBe(true); // the y-intercept, which is also the minimum
+    expect(ps.length).toBe(3);
+    // a double root (touching the axis) is still an x-intercept
+    expect(has(pois(['y = (x - 3)^2']), 3, 0, 'xint')).toBe(true);
+    const c = pois(['y = x^3 - 3x']);
+    expect(has(c, -1, 2, 'turn') && has(c, 1, -2, 'turn')).toBe(true);
+    expect(has(c, Math.sqrt(3), 0, 'xint') && has(c, 0, 0)).toBe(true);
+  });
+
+  it('intersections between visible curves, including vertical lines and implicit curves', () => {
+    expect(has(pois(['y = x', 'y = 4 - x']), 2, 2, 'cross')).toBe(true);
+    expect(has(pois(['y = x^2', 'x = 2']), 2, 4, 'cross')).toBe(true);
+    const circ = pois(['x^2 + y^2 = 25', 'y = x']);
+    expect(has(circ, 5 / Math.SQRT2, 5 / Math.SQRT2, 'cross') && has(circ, -5 / Math.SQRT2, -5 / Math.SQRT2, 'cross')).toBe(true);
+    expect(has(circ, 5, 0, 'xint') && has(circ, 0, 5, 'yint')).toBe(true);
+    // hidden curves are left out
+    const c = compileGraph([{ id: 'a', text: 'y = x' }, { id: 'b', text: 'y = 4 - x' }]);
+    expect(findPOIs(c, new Set(['a']), -10, 10, -10, 10).some((p) => p.kind === 'cross')).toBe(false);
+  });
+
+  it('asymptotes and jumps are not roots or turning points', () => {
+    expect(pois(['y = 1/x']).length).toBe(0);
+    expect(findRoots((x) => Math.tan(x), -3, 3).map((r) => Math.round(r * 1e6) / 1e6)).toEqual([0]);
+    expect(findTurningPoints((x) => Math.floor(x), -3.5, 3.5)).toEqual([]);
+    expect(findTurningPoints(() => 5, -3, 3)).toEqual([]);
+    expect(pois(['y = sin(20x)']).length).toBeLessThanOrEqual(80); // capped
+    expect(pois([])).toEqual([]);
+  });
+
+  it('tapping near a curve finds the point on it', () => {
+    const c = compileGraph([{ id: 'a', text: 'y = x^2' }, { id: 'b', text: 'x = -3' }, { id: 'c', text: '(4, -2)' }]);
+    const vis = new Set(['a', 'b', 'c']);
+    const p = nearestCurvePoint(c, vis, 2.05, 4.3, 0.4, 0.4)!;
+    expect(p.id).toBe('a');
+    expect(p.y).toBeCloseTo(p.x * p.x, 6);
+    expect(Math.hypot(p.x - 2.05, p.y - 4.3)).toBeLessThan(0.3);
+    expect(nearestCurvePoint(c, vis, -3.1, 7, 0.3, 0.3)).toMatchObject({ x: -3, y: 7, id: 'b' });
+    expect(nearestCurvePoint(c, vis, 4.1, -2.1, 0.3, 0.3)).toMatchObject({ x: 4, y: -2, id: 'c' });
+    expect(nearestCurvePoint(c, vis, 8, -8, 0.3, 0.3)).toBeNull();
+    const imp = compileGraph([{ id: 'i', text: 'x^2 + y^2 = 25' }]);
+    const paths = new Map([['i', contourImplicit(imp.items[0].F!, -10, 10, -10, 10)]]);
+    const q = nearestCurvePoint(imp, new Set(['i']), 0.1, 5.2, 0.4, 0.4, paths)!;
+    expect(Math.hypot(q.x, q.y)).toBeCloseTo(5, 1);
+    expect(formatCoord(1.41421)).toBe('1.414');
+    expect(formatCoord(-0.0001)).toBe('0');
+    expect(formatCoord(-2.5)).toBe('−2.5');
+  });
+});
+
+describe('π tick labels', () => {
+  it('steps are simple fractions or multiples of π', () => {
+    expect(piStep(4 * Math.PI, 8)).toBeCloseTo(Math.PI / 2);
+    expect(piStep(2 * Math.PI, 8)).toBeCloseTo(Math.PI / 4);
+    expect(piStep(40 * Math.PI, 8)).toBeCloseTo(5 * Math.PI);
+    expect(piStep(1, 10)).toBeCloseTo(Math.PI / 12);
+  });
+  it('labels read the way a teacher writes them', () => {
+    const s = Math.PI / 2;
+    expect([0, 1, 2, 3, 4, -1, -2, -3].map((k) => formatPi(k * s, s))).toEqual(['0', 'π/2', 'π', '3π/2', '2π', '−π/2', '−π', '−3π/2']);
+    const t = Math.PI / 6;
+    expect([1, 2, 3, 4, 5].map((k) => formatPi(k * t, t))).toEqual(['π/6', 'π/3', 'π/2', '2π/3', '5π/6']);
+    expect(formatPi(10 * Math.PI, 5 * Math.PI)).toBe('10π');
+  });
+});
+
+describe('slider play', () => {
+  const sl = { min: 0, max: 10, step: 0.1, value: 2 };
+  it('bounces between min and max as a function of the shared clock', () => {
+    const play = { t0: 1000, v0: 2, dir: 1 as const };
+    expect(sliderValueAt({ ...sl }, 5000)).toBe(2); // not playing
+    expect(sliderValueAt({ ...sl, play }, 1000)).toBeCloseTo(2);
+    expect(sliderValueAt({ ...sl, play }, 1000 + SLIDER_SWEEP_MS * 0.4)).toBeCloseTo(6);
+    expect(sliderValueAt({ ...sl, play }, 1000 + SLIDER_SWEEP_MS * 0.8)).toBeCloseTo(10);
+    expect(sliderValueAt({ ...sl, play }, 1000 + SLIDER_SWEEP_MS * 1.0)).toBeCloseTo(8); // on its way back
+    expect(sliderDirAt({ ...sl, play }, 1000 + SLIDER_SWEEP_MS * 1.0)).toBe(-1);
+    expect(sliderValueAt({ ...sl, play }, 1000 + SLIDER_SWEEP_MS * 2.8)).toBeCloseTo(10);
+    const down = { t0: 0, v0: 2, dir: -1 as const };
+    expect(sliderValueAt({ ...sl, play: down }, SLIDER_SWEEP_MS * 0.3)).toBeCloseTo(1);
+    for (let t = 0; t < 30000; t += 137) {
+      const v = sliderValueAt({ ...sl, play }, t);
+      expect(v >= 0 && v <= 10).toBe(true);
+    }
+    expect(sliderValueAt({ min: 5, max: 5, step: 1, value: 5, play }, 9999)).toBe(5);
   });
 });

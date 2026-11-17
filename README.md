@@ -153,6 +153,14 @@ The image stores everything in `/data`; keep that on a volume.
   and ruler all show up in the shared window as they happen.
 - Click a collaborator's chip (top right) to **follow** them: your page and view track theirs until
   you pan, draw or click.
+- **Bring everyone here** (the ⌖ button next to the chips) takes the other teacher to your page and
+  view once — they get a message such as *Alex brought you to page 3*. It never interrupts a stroke:
+  it waits until their pen lifts, and it does not keep following.
+- **Countdown timer** — *Insert* (the ⊞ button) → 1, 2, 5 or 10 min, or type your own (`3`, `2:30`,
+  `90s`). Both of you and the Zoom audience see the same time; drag it anywhere, pause, reset or
+  close it. At zero it turns red and pulses (no sound). It stays visible in Focus mode, and someone
+  who joins late or reconnects sees the right time. It is not saved with the board.
+- Hold **L** to point with the laser only while the key is down; a quick press switches to it.
 - Dark mode is per person. Black ("ink") shows as white on a dark board, so the board looks right
   for both of you whichever theme each uses.
 
@@ -166,6 +174,8 @@ The image stores everything in `/data`; keep that on a volume.
   release and drag the selection to move it.
 - **iPad + Apple Pencil (Safari):** the pencil draws, one finger pans, two fingers pinch-zoom. Once a
   pen has been used, fingers never draw (palm rejection).
+- **Touch gestures:** tap with **two fingers** to undo and with **three fingers** to redo (as in
+  GoodNotes). A pinch or pan never counts as a tap.
 - **Install it on the iPad:** in Safari tap **Share → Add to Home Screen**. It gets the MathBoard
   icon and opens full screen without Safari's bars, on the start page with your recent boards
   (each listed with its name). Chrome and Edge on a computer offer *Install* in the address bar too.
@@ -207,7 +217,7 @@ Press **?** in the app for this list.
 | R | Ruler on / off (re-opens the ruler or protractor, whichever was used last) |
 | Shift+P | Protractor on / off |
 | Shift+R | Shapes |
-| L | Laser pointer |
+| L | Laser pointer (hold L: the laser only while the key is held) |
 | T | Text |
 | G | Graph |
 | A | Axes (press again to switch between x–y axes and a number line) |
@@ -228,6 +238,7 @@ Press **?** in the app for this list.
 | PageUp / PageDown | Previous / next page |
 | Esc | Cancel, deselect, stop following, leave focus mode |
 | ? | Shortcut list |
+| Two-finger / three-finger tap | Undo / redo (touch screens) |
 
 ### A typical class
 
@@ -239,18 +250,30 @@ Press **?** in the app for this list.
    It lands in the middle of the view for both of you and is **locked**, so writing on it never
    moves it. (To move or delete it: lasso tool → click it → unlock.)
 3. **Solve on top** with your pens; highlight the important line.
+   Too much in the screenshot? Select it → **Crop** (✂-frame icon), drag the handles, **Done**. The
+   original stays intact: crop again and **Reset** to get the whole picture back.
 4. **Ruler, shapes, axes or the graph** when a picture helps: drag out axes and plot by hand, or
-   drag out a graph and type `y = 2x^2 - 3x + 1`. Unknown letters (`y = a x^2 + b`) become sliders.
+   drag out a graph and type `y = 2x^2 - 3x + 1`. Unknown letters (`y = a x^2 + b`) become sliders;
+   **▶** plays a slider back and forth for everyone. The graph also takes `x^2 + y^2 = 25`,
+   `y = x^2 {x > 0}` or `{-1 <= x <= 3}`, and *Degrees* for trig; *Trig (−2π..2π)* labels the x axis
+   in π/2, π, 3π/2…. With the graph selected, intercepts, turning points and intersections are
+   marked — tap one, or anywhere on a curve, to read its coordinates. On the iPad, the key row above
+   the expressions has `^ √ π ≤ ≥ |x| ( )`. Axes have *Four quadrants* / *First quadrant*, grid
+   lines, their own labels and π labels in their panel.
 5. **Tape over the answer** — draw a tape strip across it; click the tape to reveal it for
    everyone ("try it first, then we'll check").
 6. Need more room in the middle of a solution? **Insert space** and drag down.
-7. After class: **☰ → Export as PDF…** for the students — this page or the whole notebook, sized
+7. **Reset for the next class** (☰ menu or the eraser's settings): *Clear ink, keep everything
+   else* removes the strokes and shapes that are not locked and keeps the images, graphs, axes, text
+   and tape; *Cover all tape again* hides the answers. Both work on this page (Ctrl/Cmd+Z undoes) or on
+   the whole notebook (the server keeps a backup copy first — see *Your data on disk*).
+8. After class: **☰ → Export as PDF…** for the students — this page or the whole notebook, sized
    to the content or on Letter / A4 (tall pages continue on more sheets instead of shrinking), with
    the answers still covered or an answer-key copy, on white or on the page's grid. Ink stays sharp
    when the PDF is zoomed. **Back up notebook** for you, and **Replay this page's ink** to review a
    solution step by step.
 
-Other handy things: **select → copy** (Ctrl/Cmd+C) and paste into another tab or another board —
+The sidebar shows a small live preview of every page. Other handy things: **select → copy** (Ctrl/Cmd+C) and paste into another tab or another board —
 images come along. Select a shape to change its dashes, fill colour and fill opacity. Change your
 name in **☰ → Settings**; everyone sees it at once. Dark mode starts from your system setting.
 

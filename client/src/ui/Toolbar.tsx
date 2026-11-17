@@ -8,6 +8,7 @@ import { nanoid } from 'nanoid';
 import type { PenType } from '../../../shared/types';
 import { drawLiveStroke } from '../engine/render';
 import { ERASER_SIZES, HL_COLORS, PEN_COLORS, SIZE_PRESETS, TAPE_COLORS, type PenFav, type ShapeTool, type ToolId } from '../engine/store';
+import { TimerPresets } from './Timer';
 import { cssColor, IconBtn, MOD, Popover, Section, Segmented, Slider, Swatches, Toggle, useEngine, useUI } from './common';
 
 /** Pen glyph drawn in the pen's own colour, with a different silhouette per pen type. */
@@ -348,6 +349,9 @@ function ToolPopovers({ anchors, close, onInsertImage }: { anchors: Record<strin
             </div>
             <div className="menu-sep" />
             <button type="button" className="menu-item" onClick={() => { close(); onInsertImage(); }}><ImagePlus size={18} />Image…<span className="key">{MOD}+V pastes</span></button>
+            <div className="menu-sep" />
+            <div className="menu-title">Countdown timer (everyone sees it)</div>
+            <TimerPresets onDone={close} />
           </div>
           <p className="hint">Graph, axes and tape: pick one, then drag out a box on the board. Tap a tape to reveal or hide it for everyone.</p>
         </Popover>

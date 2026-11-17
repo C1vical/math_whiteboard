@@ -1,4 +1,4 @@
-import { lazy, Suspense } from 'react';
+import { lazy, Suspense, useEffect, useState } from 'react';
 import { X } from 'lucide-react';
 import type { Axes } from '../../../shared/types';
 import { IconBtn, NumField, Section, Segmented, Toggle, useEngine, useUI } from './common';
@@ -27,6 +27,23 @@ export function Inspector() {
   );
 }
 
+/** A short text field that commits on Enter or when it loses focus. */
+function LabelField({ label, value, onCommit }: { label: string; value: string; onCommit: (v: string) => void }) {
+  const [text, setText] = useState(value);
+  useEffect(() => setText(value), [value]);
+  const commit = () => { const t = text.trim().slice(0, 24); if (t !== value) onCommit(t); };
+  return (
+    <label className="numfield">
+      <span>{label}</span>
+      <input
+        type="text" value={text} maxLength={24} style={{ width: 70 }} aria-label={`${label} label`}
+        onChange={(e) => setText(e.target.value)} onBlur={commit}
+        onKeyDown={(e) => { e.stopPropagation(); if (e.key === 'Enter') e.currentTarget.blur(); }}
+      />
+    </label>
+  );
+}
+
 function AxesPanel({ a }: { a: Axes }) {
   const engine = useEngine();
   const locked = !!a.locked;
@@ -41,6 +58,19 @@ function AxesPanel({ a }: { a: Axes }) {
   const setStep = (key: 'xStep' | 'yStep', v: number) => {
     if (v > 0) update({ [key]: num(v) });
   };
+  /**
+   * Four quadrants / first quadrant only. The origin stays where it is on the board and one unit
+   * stays the same size, so ticks keep landing on the page's grid lines.
+   */
+  const preset = (kind: 'four' | 'first') => {
+    const ux = a.w / (a.xMax - a.xMin), uy = a.h / (a.yMax - a.yMin);
+    const ox = a.x + (0 - a.xMin) * ux, oy = a.y + a.h - (0 - a.yMin) * uy;
+    const rx = Math.max(Math.abs(a.xMin), Math.abs(a.xMax)) || 5, ry = Math.max(Math.abs(a.yMin), Math.abs(a.yMax)) || 5;
+    const r1 = (v: number) => Math.round(v * 10) / 10;
+    if (kind === 'four') update({ xMin: -rx, xMax: rx, yMin: -ry, yMax: ry, x: r1(ox - rx * ux), y: r1(oy - ry * uy), w: r1(2 * rx * ux), h: r1(2 * ry * uy) });
+    else update({ xMin: 0, xMax: rx, yMin: 0, yMax: ry, x: r1(ox), y: r1(oy - ry * uy), w: r1(rx * ux), h: r1(ry * uy) });
+  };
+  const quadrant = a.xMin >= 0 && a.yMin >= 0 ? 'first' : a.xMin < 0 && a.xMax > 0 && a.yMin < 0 && a.yMax > 0 ? 'four' : null;
   return (
     <fieldset disabled={locked} style={{ border: 'none', margin: 0, padding: 0, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 12 }}>
       {locked && <p className="hint">These axes are locked. Unlock them from the selection bar to edit.</p>}
@@ -62,6 +92,14 @@ function AxesPanel({ a }: { a: Axes }) {
         </div>
       </Section>
       {a.mode === 'xy' && (
+        <Section title="Layout">
+          <div className="row">
+            <button type="button" className={`chip ${quadrant === 'four' ? 'on' : ''}`} onClick={() => preset('four')}>Four quadrants</button>
+            <button type="button" className={`chip ${quadrant === 'first' ? 'on' : ''}`} onClick={() => preset('first')}>First quadrant</button>
+          </div>
+        </Section>
+      )}
+      {a.mode === 'xy' && (
         <Section title="y axis">
           <div className="grid3">
             <NumField label="min" value={a.yMin} onCommit={(v) => setRange({ yMin: v })} width={54} />
@@ -70,7 +108,19 @@ function AxesPanel({ a }: { a: Axes }) {
           </div>
         </Section>
       )}
+      <Section title="Axis labels">
+        <div className="grid2">
+          <LabelField label="x axis" value={a.xLabel ?? (a.mode === 'xy' ? 'x' : '')} onCommit={(xLabel) => update({ xLabel })} />
+          {a.mode === 'xy' && <LabelField label="y axis" value={a.yLabel ?? 'y'} onCommit={(yLabel) => update({ yLabel })} />}
+        </div>
+      </Section>
       <Toggle label="Show numbers" checked={a.showNumbers} onChange={(showNumbers) => update({ showNumbers })} />
+      {a.mode === 'xy' && <Toggle label="Grid lines" hint="Light lines inside the axes, one per tick" checked={!!a.grid} onChange={(on) => update({ grid: on ? true : null })} />}
+      <Toggle
+        label="Label x in multiples of π" hint="π/2, π, 3π/2 … for trig"
+        checked={!!a.piTicks}
+        onChange={(on) => update(on ? { piTicks: true, xStep: Math.PI / 2, xMin: Math.min(a.xMin, -2 * Math.PI), xMax: Math.max(a.xMax, 2 * Math.PI) } : { piTicks: null, xStep: 1 })}
+      />
       <p className="hint">Ink goes on top of the axes. With a grid background and “Snap to grid” on, the ticks land on grid lines.</p>
     </fieldset>
   );

@@ -241,7 +241,7 @@ button.user-chip:hover { background: var(--hover); }
 
 /* a long row of pens (more than ten) gets narrower buttons so the bar stays on one row */
 .favs.many { gap: 0; }
-.favs.many .fav { width: 28px; }
+.favs.many .fav { width: 26px; }
 .favs.many .fav svg { transform: translateY(3px) scale(0.88); }
 .favs.many .fav.active svg { transform: translateY(-1px) scale(0.88); }
 
@@ -267,6 +267,7 @@ button.user-chip:hover { background: var(--hover); }
   .topbar:has(.favs.many) .board-title { max-width: 80px; }
   .topbar:has(.favs.many) .toolbar { gap: 0; }
   .topbar:has(.favs.many) .sep { margin: 0 2px; }
+  .topbar:has(.favs.many) .topright { gap: 3px; }
 }
 
 /* ---------- buttons & form controls ---------- */
@@ -538,9 +539,11 @@ kbd {
   position: relative;
   display: flex;
   align-items: center;
-  gap: 6px;
+  flex-wrap: wrap;
+  gap: 0 6px;
   min-height: 42px;
-  padding: 0 2px 0 8px;
+  padding: 6px 2px 0 8px;
+  margin-bottom: 2px;
   border: 1.5px solid transparent;
   border-radius: 9px;
   cursor: pointer;
@@ -548,6 +551,16 @@ kbd {
 .page-row:hover { background: var(--hover); }
 .page-row.active { background: var(--accent-soft); }
 .page-row.drop { border-top-color: var(--accent); }
+.page-thumb {
+  display: block;
+  flex: 0 0 calc(100% - 6px);
+  width: calc(100% - 6px);
+  aspect-ratio: 172 / 104;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  background: var(--board);
+  pointer-events: none;
+}
 .page-row .num { width: 18px; flex: none; text-align: right; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 .page-row .title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .page-row.active .title { font-weight: 600; }
@@ -900,3 +913,40 @@ kbd {
   .inspector { width: 270px; }
   .save-ind { display: none; }
 }
+
+/* ---------- shared countdown timer ---------- */
+.timer-widget {
+  position: absolute;
+  z-index: 13;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  min-width: 156px;
+  padding: 8px 10px 6px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+.timer-widget:active { cursor: grabbing; }
+.timer-face { display: flex; align-items: baseline; justify-content: center; gap: 8px; }
+.timer-time { font-size: 34px; font-weight: 700; line-height: 1.1; font-variant-numeric: tabular-nums; color: var(--text); }
+.timer-done { font-size: 15px; font-weight: 700; color: #fff; }
+.timer-bar { height: 4px; border-radius: 2px; background: var(--hover); overflow: hidden; }
+.timer-bar i { display: block; height: 100%; background: var(--accent); transition: width 0.2s linear; }
+.timer-btns { display: flex; justify-content: center; gap: 2px; }
+.timer-widget.done { background: #e03131; border-color: #c92a2a; animation: timer-flash 1s ease-in-out 6; }
+.timer-widget.done .timer-time { color: #fff; }
+.timer-widget.done .timer-bar { background: rgba(255, 255, 255, 0.35); }
+.timer-widget.done .ibtn { color: #fff; }
+@keyframes timer-flash { 50% { transform: scale(1.06); filter: brightness(1.15); } }
+@media (prefers-reduced-motion: reduce) { .timer-widget.done { animation: none; } }
+.timer-presets { display: flex; flex-direction: column; gap: 6px; padding: 2px 8px 6px; }
+.timer-row { display: flex; gap: 6px; }
+.timer-row .btn { flex: 1; padding: 0 6px; }
+.timer-row .field.small { height: 32px; font-size: 13px; padding: 0 8px; flex: 1; min-width: 0; }
+.field.invalid { border-color: var(--danger); outline-color: var(--danger); }

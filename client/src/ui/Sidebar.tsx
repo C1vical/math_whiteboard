@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { ArrowDown, ArrowUp, Copy, Ellipsis, PanelLeftClose, Pencil, Plus, Trash2 } from 'lucide-react';
 import type { PageInfo } from '../engine/store';
+import { THUMB_H, THUMB_W } from '../engine/thumbs';
 import { Dialog, IconBtn, Popover, useEngine, useUI } from './common';
 
 function RenameInput({ page, onDone }: { page: PageInfo; onDone: (title: string | null) => void }) {
@@ -21,6 +22,27 @@ function RenameInput({ page, onDone }: { page: PageInfo; onDone: (title: string 
   );
 }
 
+/** A small live preview of a page, copied from the engine's idle-time thumbnail cache. */
+function PageThumb({ pageId }: { pageId: string }) {
+  const engine = useEngine();
+  const ref = useRef<HTMLCanvasElement>(null);
+  useEffect(() => {
+    const paint = () => {
+      const src = engine.thumbs.get(pageId), c = ref.current;
+      if (!src || !c) return;
+      if (c.width !== src.width || c.height !== src.height) { c.width = src.width; c.height = src.height; }
+      const ctx = c.getContext('2d');
+      if (!ctx) return;
+      ctx.clearRect(0, 0, c.width, c.height);
+      ctx.drawImage(src, 0, 0);
+      c.classList.add('ready');
+    };
+    paint();
+    return engine.onThumb((id) => { if (id === pageId) paint(); });
+  }, [engine, pageId]);
+  return <canvas ref={ref} className="page-thumb" width={THUMB_W} height={THUMB_H} aria-hidden="true" />;
+}
+
 /** OneNote-style pages list: add, rename, duplicate, delete, drag to reorder. */
 export function Sidebar() {
   const engine = useEngine();
@@ -36,8 +58,15 @@ export function Sidebar() {
   const [dropAt, setDropAt] = useState<string | null>(null);
   const dragId = useRef<string | null>(null);
   const moreBtns = useRef<Record<string, HTMLButtonElement | null>>({});
+  const shown = open && !focus;
+  // thumbnails are only drawn while the list is showing
+  useEffect(() => {
+    if (!shown) return;
+    engine.thumbs.setEnabled(true);
+    return () => engine.thumbs.setEnabled(false);
+  }, [engine, shown]);
 
-  if (!open || focus) return null;
+  if (!shown) return null;
 
   const finishRename = (id: string, title: string | null) => {
     setRenaming(null);
@@ -76,6 +105,7 @@ export function Sidebar() {
               onDragEnd={() => { dragId.current = null; setDropAt(null); }}
               onDrop={(e) => { e.preventDefault(); e.stopPropagation(); drop(p.id); }}
             >
+              <PageThumb pageId={p.id} />
               <span className="num">{i + 1}</span>
               {renaming === p.id
                 ? <RenameInput page={p} onDone={(t) => finishRename(p.id, t)} />

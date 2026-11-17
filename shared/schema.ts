@@ -27,7 +27,8 @@ const box = { x: num, y: num, w: pos, h: pos };
 const range = { xMin: num, xMax: num, yMin: num, yMax: num };
 
 export const graphExpr = z.object({ id: z.string().max(32), text: z.string().max(300), color, visible: z.boolean() });
-export const graphSlider = z.object({ name: z.string().min(1).max(8), min: num, max: num, step: num, value: num });
+const slidePlay = z.object({ t0: z.number().finite().min(0).max(1e14), v0: num, dir: z.union([z.literal(1), z.literal(-1)]) });
+export const graphSlider = z.object({ name: z.string().min(1).max(8), min: num, max: num, step: num, value: num, play: slidePlay.nullish() });
 export const axisLabel = z.string().max(24);
 export const angleMode = z.enum(['rad', 'deg']);
 

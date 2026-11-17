@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import {
-  Check, CirclePlay, CloudOff, Eraser, FileDown, FileJson, FileUp, ImageDown, ImagePlus, Keyboard, LoaderCircle, LogOut, Maximize2, Menu, Moon, RotateCcw, Settings,
+  Check, CirclePlay, CloudOff, Eraser, FileDown, FileJson, FileUp, ImageDown, ImagePlus, Keyboard, LoaderCircle, LocateFixed, LogOut, Maximize2, Menu, Moon, RotateCcw, Settings,
   Share2, StickyNote, Sun,
 } from 'lucide-react';
 import { DEFAULT_TITLE, type Background } from '../../../shared/types';
@@ -100,6 +100,11 @@ function Presence() {
         );
       })}
       {sorted.length > 8 && <span className="user-chip me more">+{sorted.length - 8}</span>}
+      {sorted.length > 1 && (
+        <IconBtn tip="Bring everyone to my page and view (once)" className="small summon" onClick={() => engine.summonEveryone()}>
+          <LocateFixed size={17} />
+        </IconBtn>
+      )}
     </div>
   );
 }

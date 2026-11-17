@@ -355,6 +355,84 @@ describe('server integration', () => {
     a.close(); b.close();
   });
 
+  it('shared countdown: state lives on the server, late joiners see the right time, never saved to disk', async () => {
+    const dir = tmp();
+    const srv = await createApp({ port: 0, dataDir: dir, quiet: true, sweepUploads: false });
+    const a = await client(srv.port), b = await client(srv.port);
+    const ja = await join(a, 'clock', 'A');
+    expect(ja.timer ?? null).toBeNull();
+    expect(Math.abs(ja.now! - Date.now())).toBeLessThan(2000);
+    await join(b, 'clock', 'B');
+    const next = () => once<{ timer: any; now: number; by: string }>(b, 'timer');
+    let got = next();
+    a.emit('timer', { action: 'show', durationMs: 120000 });
+    expect((await got).timer).toMatchObject({ durationMs: 120000, remainingMs: 120000, endsAt: null });
+    got = next();
+    a.emit('timer', { action: 'start' });
+    const started = await got;
+    expect(started.timer.endsAt).toBeGreaterThanOrEqual(started.now + 119000);
+    expect(started.by).toBe(a.id);
+    // a late joiner gets the running timer and the server clock, so it computes the same remaining time
+    await wait(60);
+    const c = await client(srv.port);
+    const jc = await join(c, 'clock', 'C');
+    expect(jc.timer!.endsAt).toBe(started.timer.endsAt);
+    expect(jc.timer!.endsAt! - jc.now!).toBeLessThan(120000);
+    got = next();
+    a.emit('timer', { action: 'move', x: 0.8, y: 0.2 });
+    expect((await got).timer).toMatchObject({ x: 0.8, y: 0.2 });
+    // invalid actions are dropped
+    let leaked = false;
+    const spy = () => { leaked = true; };
+    b.on('timer', spy);
+    a.emit('timer', { action: 'show', durationMs: 5 });
+    a.emit('timer', { action: 'show', durationMs: 48 * 3600 * 1000 });
+    a.emit('timer', { action: 'explode' });
+    a.emit('timer', { action: 'move', x: 'left' });
+    a.emit('timer', { action: 'start' }); // already running: nothing changes
+    await wait(100);
+    expect(leaked).toBe(false);
+    b.off('timer', spy);
+    // the timer is never part of the saved notebook
+    const saved = once(a, 'saved');
+    a.emit('ops', { ops: [addOp(ja.notebook!.pages[0].id, mkStroke('t', [0, 0, 0.5]))] });
+    await saved;
+    expect(JSON.stringify(await readNotebookFromDisk(dir, 'clock'))).not.toMatch(/endsAt|durationMs/);
+    got = next();
+    a.emit('timer', { action: 'dismiss' });
+    expect((await got).timer).toBeNull();
+    a.close(); b.close(); c.close();
+    await srv.close();
+  });
+
+  it('a playing graph slider is stored as its start time, so every screen animates the same', async () => {
+    const a = await client(app.port), b = await client(app.port);
+    const pageId = (await join(a, 'slide', 'A')).notebook!.pages[0].id;
+    await join(b, 'slide', 'B');
+    const g = {
+      id: 'g', type: 'graph', authorId: 'u', createdAt: 1, x: 0, y: 0, w: 400, h: 300, xMin: -10, xMax: 10, yMin: -10, yMax: 10,
+      showGrid: true, showNumbers: true, expressions: [{ id: 'e', text: 'y = a x', color: '#1971c2', visible: true }],
+      sliders: [{ name: 'a', min: -5, max: 5, step: 0.1, value: 1 }],
+    };
+    let got = once<{ ops: Op[] }>(b, 'ops');
+    a.emit('ops', { ops: [{ opId: 'g1', pageId, kind: 'add', obj: g }] });
+    await got;
+    got = once(b, 'ops');
+    const play = { t0: Date.now(), v0: 1, dir: 1 };
+    a.emit('ops', { ops: [{ opId: 'g2', pageId, kind: 'update', id: 'g', patch: { sliders: [{ ...g.sliders[0], play }], angle: 'deg', piTicks: true } }] });
+    const upd = (await got).ops[0] as Extract<Op, { kind: 'update' }>;
+    expect((upd.patch.sliders as any[])[0].play).toEqual(play);
+    // a bad play value is refused
+    let leaked = false;
+    b.on('ops', () => { leaked = true; });
+    const ack = once(a, 'ack');
+    a.emit('ops', { ops: [{ opId: 'g3', pageId, kind: 'update', id: 'g', patch: { sliders: [{ ...g.sliders[0], play: { t0: 1, v0: 1, dir: 2 } }] } }] });
+    await ack;
+    await wait(80);
+    expect(leaked).toBe(false);
+    a.close(); b.close();
+  });
+
   it('presence follows joins, page changes and disconnects; transient events are relayed', async () => {
     const a = await client(app.port), b = await client(app.port);
     await join(a, 'pres', 'Ann');

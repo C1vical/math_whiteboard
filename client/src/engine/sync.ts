@@ -34,6 +34,7 @@ export class Sync {
   savedT = 0;
   /** server clock minus this device's clock, so countdowns agree on every screen */
   clockOffset = 0;
+  private clockAt = 0;
   private first = true;
   private offlineTimer = 0;
   private closed = false;
@@ -79,7 +80,11 @@ export class Sync {
   }
 
   private clock(serverNow: number | undefined) {
-    if (typeof serverNow === 'number') this.clockOffset = serverNow - Date.now();
+    if (typeof serverNow !== 'number') return;
+    const now = Date.now(), sample = serverNow - now;
+    // a message that was held up (the network, a busy tab) gives too small a sample; the largest
+    // recent one is the closest, and after a minute any new sample replaces it (clock changes)
+    if (!this.clockAt || sample > this.clockOffset || now - this.clockAt > 60000) { this.clockOffset = sample; this.clockAt = now; }
   }
 
   /** the server's clock, as well as this device can tell */

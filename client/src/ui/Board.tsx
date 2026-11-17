@@ -10,6 +10,7 @@ import { Inspector } from './Inspector';
 import { SelectionBar } from './SelectionBar';
 import { Sidebar } from './Sidebar';
 import { FocusBar, Toolbar } from './Toolbar';
+import { TimerWidget } from './Timer';
 import { TopRight } from './TopRight';
 import { DEFAULT_TITLE } from '../../../shared/types';
 import { pickFiles, rememberBoard } from './util';
@@ -156,6 +157,7 @@ function Overlays({ onExit, onBadPasscode }: { onExit: () => void; onBadPasscode
       {!replay && <SelectionBar />}
       {!replay && <Inspector />}
       {focus && <FocusBar />}
+      <TimerWidget />
       <div className={`banners ${focus ? 'below-focusbar' : ''}`}>
         <ConnBanner />
         <FollowBanner />
