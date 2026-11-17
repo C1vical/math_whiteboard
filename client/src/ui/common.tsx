@@ -1,4 +1,5 @@
 import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { createPortal } from 'react-dom';
 import { Check } from 'lucide-react';
 import type { Engine } from '../engine/Engine';
 import { useStore, type Store, type UIState } from '../engine/store';
@@ -67,10 +68,12 @@ export function Popover({ anchor, onClose, children, width = 260, align = 'left'
     return () => document.removeEventListener('pointerdown', down, true);
   }, [anchor, onClose]);
   if (!anchor) return null;
-  return (
+  // rendered at the document root so no toolbar / sidebar stacking context can cover it
+  return createPortal(
     <div ref={ref} className="popover" style={{ left: pos?.left ?? -9999, top: pos?.top ?? 0, width: Math.min(width, window.innerWidth - 16), maxHeight: pos?.maxH, visibility: pos ? 'visible' : 'hidden' }}>
       {children}
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -163,13 +166,14 @@ export function NumField({ value, onCommit, label, width = 64 }: { value: number
 }
 
 export function Dialog({ title, onClose, children, width = 460, actions }: { title: string; onClose?: () => void; children: ReactNode; width?: number; actions?: ReactNode }) {
-  return (
+  return createPortal(
     <div className="backdrop" onPointerDown={(e) => { if (e.target === e.currentTarget) onClose?.(); }}>
-      <div className="dialog" role="dialog" aria-label={title} style={{ width }}>
+      <div className="dialog" role="dialog" aria-modal="true" aria-label={title} style={{ width }}>
         <div className="dialog-title">{title}</div>
         <div className="dialog-body">{children}</div>
         {actions && <div className="dialog-actions">{actions}</div>}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

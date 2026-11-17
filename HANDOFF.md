@@ -13,6 +13,12 @@ math whiteboard. Continue development from this commit rather than starting over
 
 ## Current state
 
+- **Update (second session):** the client now has its entry point, landing screen, full UI
+  chrome and styles, a README and a Dockerfile, and the app runs end to end. Everything in
+  the master prompt's P0 and P1 lists is wired to the UI and was exercised in two browser
+  sessions. See "Not verified here" at the end of `PLAN.md` for what still needs a real
+  pen, an iPad, Firefox/Safari and a Docker host. The committed-layer rendering was
+  reworked for performance (see "Rendering" in `PLAN.md`).
 - The project is a TypeScript/Vite client with a Node/Express/Socket.IO server.
 - Shared drawing, geometry, operation, recognition, ruler, graph, and image-sizing
   modules are under `shared/`.

@@ -32,7 +32,8 @@ export function rulerContains(r: RulerState, px: number, py: number): boolean {
 }
 
 export function knobPos(r: RulerState): [number, number] {
-  return r.kind === 'ruler' ? toWorld(r, RULER_LEN / 2 - 50, 0) : toWorld(r, 0, -PROT_R * 0.45);
+  // near the middle, so the knob is on screen whenever the ruler's centre is (the ruler is longer than most windows)
+  return r.kind === 'ruler' ? toWorld(r, 210, 4) : toWorld(r, 0, -PROT_R * 0.45);
 }
 
 /** Which ruler feature (if any) a stroke starting at (px,py) should snap to. */

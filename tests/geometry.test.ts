@@ -5,7 +5,7 @@ import {
 } from '../shared/geometry';
 import { downscaleSize, placeImage } from '../shared/imageSize';
 import { applyOp, newNotebook } from '../shared/ops';
-import { findSnap, RULER_LEN, RULER_W, snapAngle, snapPoint, toWorld } from '../shared/ruler';
+import { findSnap, knobPos, PROT_R, RULER_LEN, RULER_W, rulerContains, snapAngle, snapPoint, toWorld } from '../shared/ruler';
 import type { ImageObj, RulerState } from '../shared/types';
 import { draw, mkShape, mkStroke } from './helpers';
 
@@ -128,6 +128,21 @@ describe('ruler edge-snap math', () => {
     expect(snapAngle(37.4, false)).toBe(37.4);
     expect(snapAngle(37.4, true)).toBe(35);
     expect(snapAngle(363, true)).toBe(5);
+  });
+
+  it('the rotate knob sits on the tool, close to its centre (the ruler is longer than a 1280 px window)', () => {
+    for (const angle of [0, 33, 90, -120]) {
+      const r: RulerState = { visible: true, kind: 'ruler', x: 400, y: 300, angle };
+      const [kx, ky] = knobPos(r);
+      expect(rulerContains(r, kx, ky)).toBe(true);
+      const d = Math.hypot(kx - r.x, ky - r.y);
+      expect(d).toBeGreaterThan(100); // enough leverage to rotate precisely
+      expect(d).toBeLessThan(300); // visible whenever the middle of the ruler is
+      const p: RulerState = { ...r, kind: 'protractor' };
+      const [px, py] = knobPos(p);
+      expect(rulerContains(p, px, py)).toBe(true);
+      expect(Math.hypot(px - p.x, py - p.y)).toBeLessThan(PROT_R);
+    }
   });
 });
 

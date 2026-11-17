@@ -157,7 +157,7 @@ describe('server integration', () => {
     expect(Buffer.from(await served.arrayBuffer()).equals(PNG)).toBe(true);
 
     const post = (id: string, type: string, body: Buffer | string) =>
-      fetch(`${url}/api/upload/${id}`, { method: 'POST', headers: { 'content-type': type }, body });
+      fetch(`${url}/api/upload/${id}`, { method: 'POST', headers: { 'content-type': type }, body: typeof body === 'string' ? body : new Uint8Array(body) });
     expect((await post('up1', 'text/plain', 'hello')).status).toBe(415); // not an image type
     expect((await post('up1', 'image/png', Buffer.from('<script>alert(1)</script>'))).status).toBe(415); // magic bytes
     expect((await post('up1', 'image/jpeg', PNG)).status).toBe(415); // type / content mismatch

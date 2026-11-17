@@ -200,11 +200,16 @@ function drawText(ctx: CanvasRenderingContext2D, o: TextObj, env: RenderEnv) {
   withFrame(ctx, frameOf(o)!, (x, y) => {
     ctx.fillStyle = resolveColor(o.color, env.dark);
     ctx.font = `${o.fontSize}px ${FONT}`;
-    ctx.textBaseline = 'top';
+    ctx.textBaseline = 'alphabetic';
     ctx.textAlign = 'left';
     const lines = o.text.split('\n');
     const lh = o.fontSize * LINE_H;
-    for (let i = 0; i < lines.length; i++) ctx.fillText(lines[i], x, y + i * lh + (lh - o.fontSize) / 2);
+    // Same model as a CSS line box (content area centred in the line height), so the
+    // text does not shift when the on-screen editor is replaced by the canvas rendering.
+    const m = ctx.measureText('Mg');
+    const asc = m.fontBoundingBoxAscent || o.fontSize * 0.93, desc = m.fontBoundingBoxDescent || o.fontSize * 0.25;
+    const base = (lh - (asc + desc)) / 2 + asc;
+    for (let i = 0; i < lines.length; i++) ctx.fillText(lines[i], x, y + i * lh + base);
   });
 }
 

@@ -110,6 +110,8 @@ export interface SelInfo {
 }
 
 export interface TextEdit {
+  /** unique per editing session, so the editor remounts and refocuses */
+  key: number;
   id: string | null;
   x: number; y: number; // world
   text: string;
@@ -136,6 +138,8 @@ export interface UIState {
   canUndo: boolean;
   canRedo: boolean;
   sel: SelInfo | null;
+  /** true while the selection is being dragged / resized / rotated */
+  selBusy: boolean;
   ruler: RulerState;
   popover: string | null;
   textEdit: TextEdit | null;
@@ -145,7 +149,9 @@ export interface UIState {
   toasts: Toast[];
   restore: { reason: 'empty' | 'older' } | null;
   graphInteract: boolean;
-  dialog: null | 'shortcuts' | 'settings' | 'pdf' | 'clearPage' | 'clearMine';
+  dialog: null | 'shortcuts' | 'settings' | 'pdf' | 'clearPage' | 'clearMine' | 'importJson';
+  /** the file chosen for the 'pdf' / 'importJson' dialogs */
+  pendingFile: File | null;
 }
 
 type Listener = () => void;
@@ -177,9 +183,9 @@ export function initialUI(name: string, userId: string): UIState {
   return {
     ready: false, fatal: null, tool: 'pen', settings: loadSettings(), pages: [], pageId: '',
     users: [], me: { sid: '', userId, name, color: '#1971c2' }, conn: 'reconnecting', saving: false, zoom: 1,
-    canUndo: false, canRedo: false, sel: null,
+    canUndo: false, canRedo: false, sel: null, selBusy: false,
     ruler: { visible: false, kind: 'ruler', x: 0, y: 0, angle: 0 },
     popover: null, textEdit: null, following: null, replay: null, focus: false, toasts: [], restore: null,
-    graphInteract: false, dialog: null,
+    graphInteract: false, dialog: null, pendingFile: null,
   };
 }

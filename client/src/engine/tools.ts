@@ -416,6 +416,7 @@ class SelectGesture implements Gesture {
     if (this.mode === 'move' || this.mode === 'scale' || this.mode === 'rotate') {
       if (this.ids.size) {
         this.input.transformingSelection = true;
+        e.ui.set({ selBusy: true }); // the floating action bar steps aside while the selection is dragged
         e.setPreview(this.ids, this.m);
       }
     }
@@ -425,6 +426,7 @@ class SelectGesture implements Gesture {
   up(ev: PointerEvent) {
     const e = this.e, page = e.page;
     this.input.transformingSelection = false;
+    e.ui.set({ selBusy: false });
     if (this.mode === 'move' || this.mode === 'scale' || this.mode === 'rotate') {
       if (this.moved && this.ids.size) {
         if (this.mode === 'move') {
@@ -476,6 +478,7 @@ class SelectGesture implements Gesture {
 
   cancel() {
     this.input.transformingSelection = false;
+    this.e.ui.set({ selBusy: false });
     this.e.setPreview(null);
     this.e.invalidateLive();
   }

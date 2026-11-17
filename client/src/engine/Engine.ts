@@ -30,6 +30,10 @@ export interface EngineOptions { notebookId: string; userId: string; name: strin
 
 const MIN_ZOOM = 0.1, MAX_ZOOM = 8;
 const UNDO_LIMIT = 500;
+/** how far (CSS px) a pan may slide the cached ink bitmap before the exposed strips are painted */
+const SCROLL_STEP = 96;
+/** how far (world units) an object's rendering may reach outside its geometric bounds */
+const PAINT_SPILL = 64;
 const HANDLE_DIRS: [number, number][] = [[-1, -1], [0, -1], [1, -1], [1, 0], [1, 1], [0, 1], [-1, 1], [-1, 0]];
 const strip = (ops: Op[]): OpBody[] => ops.map(({ opId: _o, pageId: _p, ...rest }) => rest as OpBody);
 
@@ -64,6 +68,16 @@ export class Engine {
   private raf = 0;
   private mainCam: Camera = { x: 0, y: 0, zoom: 1 };
   private lastFullMs = 0; private lastFullAt = 0; private camMovedAt = 0;
+  /** overscan (CSS px) around the viewport on the committed layer, so panning can reuse the bitmap */
+  private margin = 0;
+  /** world-space region of the committed layer that must be repainted (cheaper than a full redraw) */
+  private dirtyRect: BBox | null = null;
+  /** real cost of the last two full redraws (frame time, not just script time: canvas raster is deferred) */
+  private costSamples: [number, number] = [0, 0];
+  private probeAt = 0;
+  private camSeq = 0; private seenSeq = 0; private stillFrames = 0;
+  private lastScrollAt = 0;
+  private mainCss = '';
   private cacheTimer = 0; private cachePaused = false;
   private rulerDirty = false; private viewportSentAt = 0; private viewportDirty = true;
   private ro: ResizeObserver;
@@ -71,6 +85,7 @@ export class Engine {
   private destroyed = false;
   private hooks: ApplyHooks = { moved: carryPath };
   private toastId = 1;
+  private textKey = 0;
 
   constructor(private container: HTMLElement, public ui: Store<UIState>, public opts: EngineOptions) {
     this.nb = newNotebook(opts.notebookId, 'loading');
@@ -164,6 +179,13 @@ export class Engine {
 
   invalidate() { this.dirtyBg = this.dirtyMain = this.dirtyLive = true; this.requestFrame(); }
   invalidateMain() { this.dirtyMain = true; this.requestFrame(); }
+  /** Repaint only a region of the committed layer (world coordinates). */
+  invalidateRect(b: BBox | null) {
+    if (!b) return;
+    const d = this.dirtyRect;
+    this.dirtyRect = d ? [Math.min(d[0], b[0]), Math.min(d[1], b[1]), Math.max(d[2], b[2]), Math.max(d[3], b[3])] : [b[0], b[1], b[2], b[3]];
+    this.requestFrame();
+  }
   invalidateLive() { this.dirtyLive = true; this.requestFrame(); }
 
   // ---------- sizing ----------
@@ -179,12 +201,23 @@ export class Engine {
     this.vw = Math.max(1, Math.round(r.width));
     this.vh = Math.max(1, Math.round(r.height));
     this.dpr = Math.min(3, window.devicePixelRatio || 1);
-    for (const c of [this.bg, this.main, this.live]) {
+    for (const c of [this.bg, this.live]) {
       c.width = Math.round(this.vw * this.dpr);
       c.height = Math.round(this.vh * this.dpr);
       c.style.width = `${this.vw}px`;
       c.style.height = `${this.vh}px`;
     }
+    // the committed layer is larger than the viewport (kept under ~14 MP for tablets)
+    let m = 256;
+    while (m > 0 && (this.vw + 2 * m) * (this.vh + 2 * m) * this.dpr * this.dpr > 14e6) m -= 64;
+    this.margin = Math.max(0, m);
+    this.main.width = Math.round((this.vw + 2 * this.margin) * this.dpr);
+    this.main.height = Math.round((this.vh + 2 * this.margin) * this.dpr);
+    this.main.style.width = `${this.vw + 2 * this.margin}px`;
+    this.main.style.height = `${this.vh + 2 * this.margin}px`;
+    this.main.style.left = this.main.style.top = `${-this.margin}px`;
+    const k = this.cam.zoom * this.dpr;
+    this.cam = { x: Math.round(this.cam.x * k) / k, y: Math.round(this.cam.y * k) / k, zoom: this.cam.zoom };
     this.viewportDirty = true;
     this.updateSelUI();
     this.invalidate();
@@ -193,8 +226,13 @@ export class Engine {
   // ---------- camera ----------
   setCamera(cam: Camera, fromFollow = false) {
     const zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, cam.zoom));
-    if (zoom === this.cam.zoom && cam.x === this.cam.x && cam.y === this.cam.y) return;
-    this.cam = { x: cam.x, y: cam.y, zoom };
+    // The camera sits on whole device pixels, so a pan moves the cached ink bitmap by exact
+    // pixels: it stays crisp and stays aligned with the live layer without being repainted.
+    const k = zoom * this.dpr;
+    const x = Math.round(cam.x * k) / k, y = Math.round(cam.y * k) / k;
+    if (zoom === this.cam.zoom && x === this.cam.x && y === this.cam.y) return;
+    this.cam = { x, y, zoom };
+    this.camSeq++;
     this.cams.set(this.pageId, this.cam);
     this.camMovedAt = performance.now();
     this.dirtyBg = this.dirtyLive = true;
@@ -239,6 +277,12 @@ export class Engine {
     this.raf = 0;
     let again = false;
     try {
+      if (this.probeAt) {
+        // how long did the frame containing the last full redraw really take?
+        const dt = now - this.probeAt;
+        this.probeAt = 0;
+        if (dt < 1500 && !document.hidden) this.costSamples = [this.costSamples[1], dt > 28 ? dt : this.lastFullMs];
+      }
       again = this.input.frame(now) || again;
       if (this.replay?.playing) {
         const r = this.replay;
@@ -261,18 +305,32 @@ export class Engine {
 
       if (this.dirtyBg) { this.dirtyBg = false; this.renderBg(); }
 
-      const stale = this.cam.x !== this.mainCam.x || this.cam.y !== this.mainCam.y || this.cam.zoom !== this.mainCam.zoom;
+      // ---- committed layer: repaint as little as possible ----
+      if (this.camSeq !== this.seenSeq) { this.seenSeq = this.camSeq; this.stillFrames = 0; } else this.stillFrames++;
+      const idle = this.stillFrames >= 2 && now - this.camMovedAt > 110;
+      const cost = Math.min(this.costSamples[0], this.costSamples[1]);
       if (this.dirtyMain) this.renderMain(now);
-      else if (stale) {
-        // cheap scenes re-render every frame; heavy ones move the cached bitmap and re-render crisply on a throttle
-        if (this.lastFullMs < 7 || now - this.camMovedAt > 90 || now - this.lastFullAt > 260) this.renderMain(now);
-        else {
-          const s = this.cam.zoom / this.mainCam.zoom;
-          const tx = (this.mainCam.x - this.cam.x) * this.cam.zoom, ty = (this.mainCam.y - this.cam.y) * this.cam.zoom;
-          this.main.style.transform = `translate(${tx}px, ${ty}px) scale(${s})`;
-          again = true;
-        }
+      else if (this.cam.zoom !== this.mainCam.zoom) {
+        // light pages repaint every frame; heavy ones show the scaled bitmap and repaint on a
+        // throttle proportional to what a repaint costs, and crisply once the motion stops
+        if (cost <= 12 || idle || now - this.lastFullAt > Math.max(280, cost * 8)) this.renderMain(now);
+        else again = true;
+      } else if (this.cam.x !== this.mainCam.x || this.cam.y !== this.mainCam.y) {
+        // a pan slides the bitmap (free); only the strips it exposes are painted, a slice at a time
+        const dx = Math.abs(this.mainCam.x - this.cam.x) * this.cam.zoom, dy = Math.abs(this.mainCam.y - this.cam.y) * this.cam.zoom;
+        const share = Math.min(1, dx / (this.vw + 2 * this.margin) + dy / (this.vh + 2 * this.margin));
+        if (idle || ((Math.max(dx, dy) >= SCROLL_STEP || !this.cacheCovers()) && now - this.lastScrollAt > cost * share * 3)) this.scrollMain(now);
+        else again = true;
       }
+      if (this.dirtyRect && !this.dirtyMain) {
+        if (this.cam.zoom === this.mainCam.zoom) {
+          const b = this.dirtyRect;
+          this.dirtyRect = null;
+          this.renderRect(b, now);
+        } else again = true; // painted by the next full repaint
+      }
+      this.placeMain();
+      if (this.probeAt) again = true;
       if (this.dirtyLive) { this.dirtyLive = false; again = this.renderLive(now) || again; }
     } catch (err) {
       console.error('[engine] frame error', err);
@@ -291,6 +349,37 @@ export class Engine {
     ctx.setTransform(k, 0, 0, k, -this.cam.x * k, -this.cam.y * k);
   }
 
+  /** Camera transform for the committed layer, which is `margin` larger than the viewport on every side. */
+  private mainTransform(ctx: CanvasRenderingContext2D) {
+    const c = this.mainCam, k = this.dpr * c.zoom, m = this.margin * this.dpr;
+    ctx.setTransform(k, 0, 0, k, -c.x * k + m, -c.y * k + m);
+  }
+
+  /** Shows the committed bitmap where the current camera wants it (it was painted at `mainCam`). */
+  private placeMain() {
+    const c = this.mainCam, s = this.cam.zoom / c.zoom, m = this.margin;
+    let css = '';
+    if (s !== 1 || this.cam.x !== c.x || this.cam.y !== c.y) {
+      let tx = (c.x - this.cam.x) * this.cam.zoom + m * (1 - s), ty = (c.y - this.cam.y) * this.cam.zoom + m * (1 - s);
+      if (s === 1) { tx = Math.round(tx * this.dpr) / this.dpr; ty = Math.round(ty * this.dpr) / this.dpr; }
+      css = `translate(${tx}px, ${ty}px) scale(${s})`;
+    }
+    if (css !== this.mainCss) { this.mainCss = css; this.main.style.transform = css; }
+  }
+
+  /** World rectangle the committed layer covers when painted at `cam`. */
+  private mainView(cam: Camera = this.mainCam): BBox {
+    const m = this.margin / cam.zoom;
+    return [cam.x - m, cam.y - m, cam.x + this.vw / cam.zoom + m, cam.y + this.vh / cam.zoom + m];
+  }
+
+  /** true while the cached bitmap still shows the whole viewport at the current zoom */
+  private cacheCovers(): boolean {
+    if (this.cam.zoom !== this.mainCam.zoom) return false;
+    const c = this.mainView(), v = this.viewBox();
+    return v[0] >= c[0] && v[1] >= c[1] && v[2] <= c[2] && v[3] <= c[3];
+  }
+
   private isHidden(id: string): boolean {
     return id === this.editingId || !!this.preview?.ids.has(id);
   }
@@ -300,8 +389,68 @@ export class Engine {
     const ctx = this.mainCtx;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, this.main.width, this.main.height);
-    this.worldTransform(ctx);
-    const view = this.viewBox();
+    this.mainCam = { ...this.cam };
+    this.mainTransform(ctx);
+    this.drawContent(ctx, this.mainView());
+    this.dirtyMain = false;
+    this.dirtyRect = null;
+    this.lastFullMs = performance.now() - t0;
+    this.lastFullAt = now;
+    this.probeAt = now;
+  }
+
+  /** Repaints one world-space region of the committed layer. */
+  private renderRect(b: BBox, now: number) {
+    const c = this.mainCam, k = this.dpr * c.zoom, m = this.margin * this.dpr;
+    const ox = -c.x * k + m, oy = -c.y * k + m;
+    const pad = 3;
+    const x0 = Math.max(0, Math.floor(b[0] * k + ox) - pad), y0 = Math.max(0, Math.floor(b[1] * k + oy) - pad);
+    const x1 = Math.min(this.main.width, Math.ceil(b[2] * k + ox) + pad), y1 = Math.min(this.main.height, Math.ceil(b[3] * k + oy) + pad);
+    if (x1 <= x0 || y1 <= y0) return; // entirely off the cached area
+    if ((x1 - x0) * (y1 - y0) > this.main.width * this.main.height * 0.45) { this.renderMain(now); return; }
+    this.paintDevice(x0, y0, x1, y1);
+  }
+
+  /** Clears and repaints a rectangle given in whole device pixels of the committed canvas (so no seams appear). */
+  private paintDevice(x0: number, y0: number, x1: number, y1: number) {
+    x0 = Math.max(0, x0); y0 = Math.max(0, y0); x1 = Math.min(this.main.width, x1); y1 = Math.min(this.main.height, y1);
+    if (x1 <= x0 || y1 <= y0) return;
+    const c = this.mainCam, k = this.dpr * c.zoom, m = this.margin * this.dpr;
+    const ox = -c.x * k + m, oy = -c.y * k + m;
+    const ctx = this.mainCtx;
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.beginPath();
+    ctx.rect(x0, y0, x1 - x0, y1 - y0);
+    ctx.clip();
+    ctx.clearRect(x0, y0, x1 - x0, y1 - y0);
+    this.mainTransform(ctx);
+    this.drawContent(ctx, [(x0 - ox) / k, (y0 - oy) / k, (x1 - ox) / k, (y1 - oy) / k]);
+    ctx.restore();
+  }
+
+  /** After a pan: shifts the cached bitmap to the new camera and paints only the strips that came into range. */
+  private scrollMain(now: number) {
+    const k = this.dpr * this.cam.zoom, W = this.main.width, H = this.main.height;
+    const dx = Math.round((this.mainCam.x - this.cam.x) * k), dy = Math.round((this.mainCam.y - this.cam.y) * k);
+    this.lastScrollAt = now;
+    if (Math.abs(dx) > W * 0.55 || Math.abs(dy) > H * 0.55) { this.renderMain(now); return; } // little left to reuse
+    const ctx = this.mainCtx;
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalCompositeOperation = 'copy';
+    ctx.drawImage(this.main, dx, dy);
+    ctx.restore();
+    this.mainCam = { ...this.cam };
+    if (dx > 0) this.paintDevice(0, 0, dx, H); else if (dx < 0) this.paintDevice(W + dx, 0, W, H);
+    if (dy > 0) this.paintDevice(0, 0, W, dy); else if (dy < 0) this.paintDevice(0, H + dy, W, H);
+  }
+
+  /** Draws the page's committed objects that intersect `view`, in z-order. */
+  private drawContent(ctx: CanvasRenderingContext2D, area: BBox) {
+    // cull against a slightly larger box: ink is wider than its point bounds under pressure, and
+    // axes draw arrows and labels outside their box
+    const view: BBox = [area[0] - PAINT_SPILL, area[1] - PAINT_SPILL, area[2] + PAINT_SPILL, area[3] + PAINT_SPILL];
     const page = this.page;
     const tapes: BoardObject[] = [];
     const rp = this.replay;
@@ -329,18 +478,44 @@ export class Engine {
     // covering tape always sits above ink, whatever was written later
     for (const t of tapes) drawObject(ctx, t, this.env);
     for (const p of this.placeholders.values()) if (p.pageId === this.pageId) drawObject(ctx, p.obj, this.env);
-    this.mainCam = { ...this.cam };
-    this.main.style.transform = '';
-    this.dirtyMain = false;
-    this.lastFullMs = performance.now() - t0;
-    this.lastFullAt = now;
   }
 
   /** Draws a just-added top-most object without repainting the whole layer. */
   private appendToMain(o: BoardObject) {
     const ctx = this.mainCtx;
-    this.worldTransform(ctx);
+    this.mainTransform(ctx);
     drawObject(ctx, o, this.env);
+  }
+
+  /** Painted extent of an object: its bounds plus whatever its rendering can spill over them. */
+  private paintBounds(o: BoardObject): BBox {
+    const b = objBounds(o);
+    const p = o.type === 'stroke' ? Math.min(PAINT_SPILL, o.size + 2) : o.type === 'axes' ? 48 : 4;
+    return [b[0] - p, b[1] - p, b[2] + p, b[3] + p];
+  }
+
+  /**
+   * Union of the painted bounds of everything `ops` refer to on the current page, as the
+   * notebook stands now. Called before AND after applying, so both old and new spots repaint.
+   * Returns 'all' when a full redraw is simpler.
+   */
+  private touched(ops: Op[], acc: BBox | 'all' | null = null): BBox | 'all' | null {
+    if (acc === 'all') return acc;
+    const page = this.page;
+    let n = 0;
+    for (const op of ops) {
+      if (op.pageId !== this.pageId) continue;
+      const ids = op.kind === 'add' ? [op.obj.id] : op.kind === 'move' ? op.ids : [op.id];
+      if ((n += ids.length) > 1500) return 'all';
+      for (const id of ids) {
+        const o = page.objects[id];
+        if (!o) continue;
+        if (o.type === 'tape') return 'all'; // revealing / moving tape changes what is drawn above everything
+        const b = this.paintBounds(o);
+        acc = acc ? [Math.min(acc[0], b[0]), Math.min(acc[1], b[1]), Math.max(acc[2], b[2]), Math.max(acc[3], b[3])] : b;
+      }
+    }
+    return acc;
   }
 
   private renderLive(now: number): boolean {
@@ -542,13 +717,28 @@ export class Engine {
     const had = this.preview;
     if (!ids) {
       this.preview = null;
-      if (had) this.invalidate();
+      if (had) { this.invalidateIds(had.ids); this.invalidateLive(); }
       return;
     }
     const same = had && had.ids === ids;
     this.preview = { ids, m: m ?? [1, 0, 0, 1, 0, 0] };
-    if (!same) this.dirtyMain = true;
+    if (!same) { if (had) this.invalidateIds(had.ids); this.invalidateIds(ids); }
     this.invalidateLive();
+  }
+
+  /** Repaints where the given objects are (used when they are lifted to / dropped from the live layer). */
+  private invalidateIds(ids: Set<string>) {
+    if (ids.size > 1500) { this.invalidateMain(); return; }
+    const page = this.page;
+    let acc: BBox | null = null;
+    for (const id of ids) {
+      const o = page.objects[id];
+      if (!o) continue;
+      if (o.type === 'tape') { this.invalidateMain(); return; }
+      const b = this.paintBounds(o);
+      acc = acc ? [Math.min(acc[0], b[0]), Math.min(acc[1], b[1]), Math.max(acc[2], b[2]), Math.max(acc[3], b[3])] : b;
+    }
+    this.invalidateRect(acc);
   }
 
   // ---------- ops & undo ----------
@@ -567,10 +757,11 @@ export class Engine {
     if (!bodies.length) return [];
     const pageId = opts.pageId ?? this.pageId;
     const ops = this.stamp(bodies, pageId);
+    const before = this.touched(ops);
     const inv = strip(applyWithInverse(this.nb, ops, this.hooks));
     if (opts.undo !== false && inv.length) this.pushUndo(inv, pageId);
     this.sync.sendOps(ops);
-    this.afterOps(ops, false);
+    this.afterOps(ops, false, before);
     return inv;
   }
 
@@ -589,10 +780,11 @@ export class Engine {
     const entry = from.pop();
     if (!entry) return;
     const ops = this.stamp(entry.ops, this.pageId);
+    const before = this.touched(ops);
     const inv = strip(applyWithInverse(this.nb, ops, this.hooks));
     if (inv.length) to.push({ ops: inv });
     this.sync.sendOps(ops);
-    this.afterOps(ops, false);
+    this.afterOps(ops, false, before);
     this.updateUndoUI();
   }
   undo() { const s = this.stack(); this.runHistory(s.undo, s.redo); }
@@ -610,11 +802,12 @@ export class Engine {
   }
 
   /** Bookkeeping after any ops were applied to the notebook (mine or remote). */
-  private afterOps(ops: Op[], remote: boolean) {
+  private afterOps(ops: Op[], remote: boolean, before: BBox | 'all' | null) {
     const page = this.page;
     let needFull = false;
     let touchedCurrent = false;
-    const clean = !this.dirtyMain && !this.replay && this.cam.x === this.mainCam.x && this.cam.y === this.mainCam.y && this.cam.zoom === this.mainCam.zoom;
+    // the cached bitmap can take a new top-most object directly, even while it is slid by a pan
+    const clean = !this.dirtyMain && !this.dirtyRect && !this.replay && this.cam.zoom === this.mainCam.zoom;
     for (const op of ops) {
       if (op.kind === 'add' && remote) {
         const rs = this.remoteStrokes.get(op.obj.id);
@@ -624,10 +817,15 @@ export class Engine {
       touchedCurrent = true;
       if (!needFull && clean && op.kind === 'add' && page.order[page.order.length - 1] === op.obj.id && !this.isHidden(op.obj.id) && !this.hasCoveringTape()) {
         const o = page.objects[op.obj.id];
-        if (o && bboxIntersects(objBounds(o), this.viewBox())) this.appendToMain(o);
+        if (o && bboxIntersects(this.paintBounds(o), this.mainView())) this.appendToMain(o);
       } else needFull = true;
     }
-    if (needFull) this.dirtyMain = true;
+    if (needFull) {
+      // repaint just the old and new spots of what changed; fall back to everything when that is simpler
+      const region = this.replay ? 'all' : this.touched(ops, before);
+      if (region === 'all') this.dirtyMain = true;
+      else this.invalidateRect(region);
+    }
     if (touchedCurrent) {
       if (this.sel.size) this.selChanged();
       this.dirtyLive = true;
@@ -639,6 +837,7 @@ export class Engine {
 
   private onRemoteOps(ops: Op[]) {
     const touched = new Set<string>();
+    const before = this.touched(ops);
     for (const op of ops) {
       applyOp(this.nb, op, this.hooks);
       if (op.kind === 'update' || op.kind === 'delete') touched.add(op.id);
@@ -651,7 +850,7 @@ export class Engine {
         for (const mine of it.ops) if (mine.kind === 'update' && touched.has(mine.id)) applyOp(this.nb, mine, this.hooks);
       }
     }
-    this.afterOps(ops, true);
+    this.afterOps(ops, true, before);
   }
 
   private onRemotePageOp(op: PageOp) {
@@ -1029,11 +1228,11 @@ export class Engine {
       if (at.type !== 'text' || at.locked) return;
       this.editingId = at.id;
       this.setSelection([]);
-      this.ui.set({ textEdit: { id: at.id, x: at.x, y: at.y, text: at.text, fontSize: at.fontSize, color: at.color, rotation: at.rotation || 0 } });
+      this.ui.set({ textEdit: { key: ++this.textKey, id: at.id, x: at.x, y: at.y, text: at.text, fontSize: at.fontSize, color: at.color, rotation: at.rotation || 0 } });
       this.invalidateMain();
     } else {
       const t = this.settings.text;
-      this.ui.set({ textEdit: { id: null, x: at.x, y: at.y, text: '', fontSize: t.fontSize, color: t.color, rotation: 0 } });
+      this.ui.set({ textEdit: { key: ++this.textKey, id: null, x: at.x, y: at.y, text: '', fontSize: t.fontSize, color: t.color, rotation: 0 } });
     }
   }
 
@@ -1107,6 +1306,8 @@ export class Engine {
     this.sync?.emit('page', { pageId: this.pageId });
     this.rulerDirty = true;
     this.viewportDirty = true;
+    this.dirtyRect = null;
+    this.costSamples = [0, 0];
     this.updateUndoUI();
   }
 

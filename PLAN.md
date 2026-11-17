@@ -22,7 +22,8 @@ client/   Vite + React 18 (UI chrome only) + a canvas engine
   src/engine/   Engine (camera, 3 stacked canvases, render loop, undo), input/tools,
                 render (strokes/shapes/images/text/tape/axes/graph), sync (socket + pending queue),
                 idb (IndexedDB snapshot + image cache), export, pdf import
-  src/ui/       toolbar, popovers, pages sidebar, selection bar, graph panel, dialogs
+  src/main.tsx  entry + error boundary;  src/styles.css  all chrome styling (light / dark)
+  src/ui/       landing, toolbar, popovers, pages sidebar, selection bar, graph panel, dialogs
 tests/    vitest unit tests + real-server integration test
 ```
 
@@ -30,9 +31,31 @@ tests/    vitest unit tests + real-server integration test
 Three stacked canvases: background pattern → committed content → live layer
 (`desynchronized: true`). Committed strokes are cached as `Path2D` (perfect-freehand
 outline, world space), culled by bounding box, drawn through the camera transform.
-New strokes are appended to the committed layer without a full redraw. If a full
-redraw costs more than ~7 ms, pan/zoom moves the cached bitmap with a CSS transform
-and re-renders crisply on a throttle and when motion stops.
+
+Rasterising thousands of ink paths costs far more than a frame (measured: 50–100 µs
+per stroke on integrated graphics, and canvas raster is deferred, so script timing
+does not see it). The committed layer therefore repaints as little as possible:
+
+- **The camera sits on whole device pixels** (`setCamera` snaps it). A pan then moves
+  the cached bitmap by an exact number of pixels: it stays crisp and aligned with the
+  live layer without being repainted.
+- **Overscan.** The committed canvas is 256 CSS px larger than the viewport on every
+  side (less on very large / high-DPI screens, capped near 14 MP). `mainCam` is the
+  camera the bitmap was painted at; a CSS transform shows it where `cam` wants it.
+- **Pan = slide + strips.** Once the slide exceeds 96 px (or the view leaves the
+  cached area, or the motion stops) the bitmap is shifted in place (`drawImage` onto
+  itself) and only the newly exposed strips are painted.
+- **Edits = dirty rectangles.** Every op batch reports the painted bounds of what it
+  touched before and after it was applied; only that rectangle is cleared and
+  repainted (clipped to whole device pixels). New top-most objects are simply drawn on
+  top. Lifting objects onto the live layer (moving a selection) works the same way.
+- **Zoom.** Light pages repaint every frame. Heavy pages show the scaled bitmap and
+  repaint on a throttle proportional to the measured cost, and crisply when motion
+  stops. "Heavy" is decided from real frame times after full repaints, not script time.
+
+`tests`-wise this is covered by a browser check that compares the incrementally
+maintained bitmap with a fresh full repaint after pans, strokes, erasing, selection
+moves, undo and zoom (differences are limited to anti-aliasing on a few seam pixels).
 
 ### Ink
 `shared/ink.ts` maps (pen type, size, stabilization) → perfect-freehand options.
@@ -75,9 +98,34 @@ Every local commit computes inverse ops against the current state
 (`applyWithInverse`). Undo stacks are per user per page (500 entries); undo/redo send
 ordinary ops, so they sync and only ever touch my own actions.
 
+## UI chrome (`client/src/ui/`)
+React renders only the chrome and talks to the engine through a small external store
+(`engine/store.ts`, `useSyncExternalStore`); nothing in React runs per pointer event.
+
+- `App.tsx` — landing (name, passcode, create / join, recent boards) and `/b/<id>` routing
+- `Board.tsx` — mounts the engine; text editor overlay, zoom controls, pager, replay bar,
+  follow banner, toasts, tooltips
+- `Toolbar.tsx` — tools, pen favourites and their popovers, focus-mode bar
+- `TopRight.tsx` — presence chips (click to follow), connection / save status, Share, ☰ menu
+- `Sidebar.tsx` — pages list (add, rename, duplicate, delete, drag to reorder)
+- `SelectionBar.tsx` — floating actions for the selection
+- `Inspector.tsx` — graph panel (expressions, sliders, window) and axes panel
+- `Dialogs.tsx` — shortcuts, settings, clear confirms, device restore, backup restore, PDF import
+
+Sliders and typing in the graph panel commit continuously but collapse into a single
+undo step (`UndoGroup`).
+
 ## Milestones
+All four are implemented and verified end to end in two browser sessions
+(`npm test`, `npm run typecheck`, `npm run build` pass).
+
 - M1 canvas engine, pen input, ink, live sync, persistence
 - M2 pen types, favorites, highlighter, erasers, lasso, undo, shapes, ink-to-shape, hold, ruler
 - M3 pages, images/paste, backgrounds, laser, insert space, text
 - M4 axes, graph, protractor, scribble erase, tape, replay, follow, PDF import, export,
   focus mode, dark mode, tests, README
+
+## Not verified here
+- Real pen hardware, iPad Safari and Firefox: pointer handling was exercised with
+  synthetic pen / touch pointer events in Chrome only.
+- The Dockerfile and the Render / Railway instructions were written but not run.
