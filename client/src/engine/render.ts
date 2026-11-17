@@ -1,7 +1,8 @@
-import { arrowHead, frameOf, LINE_H, type Frame } from '../../../shared/geometry';
+import { arrowHead, frameOf, LINE_H, objBounds, type Frame } from '../../../shared/geometry';
 import { pencilAlpha, strokeOutline, type InkStyle } from '../../../shared/ink';
-import type { Background, BoardObject, Camera, ImageObj, Shape, Stroke, Tape, TextObj } from '../../../shared/types';
-import { drawAxes, drawGraph } from './graphRender';
+import type { Background, BBox, BoardObject, Camera, ImageObj, Shape, Stroke, Tape, TextObj } from '../../../shared/types';
+import { drawAxes } from './axesRender';
+import { graphModule } from './graphLoader';
 
 export interface RenderEnv {
   dark: boolean;
@@ -259,11 +260,39 @@ export function drawObject(ctx: CanvasRenderingContext2D, o: BoardObject, env: R
       case 'text': drawText(ctx, o, env); break;
       case 'tape': drawTape(ctx, o); break;
       case 'axes': withFrame(ctx, frameOf(o)!, (x, y, w, h) => drawAxes(ctx, o, x, y, w, h, env)); break;
-      case 'graph': withFrame(ctx, frameOf(o)!, (x, y, w, h) => drawGraph(ctx, o, x, y, w, h, env)); break;
+      case 'graph': {
+        const gm = graphModule();
+        withFrame(ctx, frameOf(o)!, (x, y, w, h) => {
+          if (gm) { gm.drawGraph(ctx, o, x, y, w, h, env); return; }
+          // the graph code is still downloading: an empty panel until it arrives
+          ctx.save();
+          ctx.beginPath();
+          ctx.roundRect(x, y, w, h, 6);
+          ctx.fillStyle = env.dark ? '#17181b' : '#ffffff';
+          ctx.fill();
+          ctx.strokeStyle = env.dark ? '#555b66' : '#b6bcc6';
+          ctx.lineWidth = 1.5;
+          ctx.stroke();
+          ctx.fillStyle = env.dark ? '#aeb4bd' : '#555c66';
+          ctx.font = `13px ${FONT}`;
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText('Loading graph…', x + w / 2, y + h / 2);
+          ctx.restore();
+        });
+        break;
+      }
     }
   } catch (err) {
     console.error('[render] object failed', o.id, err);
   }
+}
+
+/** Painted extent of an object: its bounds plus whatever its rendering can spill over them. */
+export function paintBounds(o: BoardObject): BBox {
+  const b = objBounds(o);
+  const p = o.type === 'stroke' ? Math.min(64, o.size + 2) : o.type === 'axes' ? 48 : 4;
+  return [b[0] - p, b[1] - p, b[2] + p, b[3] + p];
 }
 
 // ---------- page background ----------

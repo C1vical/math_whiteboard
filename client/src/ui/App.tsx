@@ -3,9 +3,9 @@ import { customAlphabet, nanoid } from 'nanoid';
 import { ID_RE } from '../../../shared/types';
 import { loadSettings } from '../engine/store';
 import { Board } from './Board';
-import { ls } from './util';
+import { loadRecent, ls, rememberBoard } from './util';
 
-const KEYS = { name: 'mathboard.name', user: 'mathboard.userId', pass: 'mathboard.passcode', recent: 'mathboard.recent' };
+const KEYS = { name: 'mathboard.name', user: 'mathboard.userId', pass: 'mathboard.passcode' };
 // no look-alike characters, so a code can be read out loud over Zoom
 const newBoardId = customAlphabet('abcdefghjkmnpqrstuvwxyz23456789', 9);
 
@@ -21,20 +21,6 @@ function getUserId(): string {
     ls.set(KEYS.user, id);
   }
   return id;
-}
-
-interface Recent { id: string; t: number }
-function loadRecent(): Recent[] {
-  try {
-    const list = JSON.parse(ls.get(KEYS.recent) ?? '[]') as Recent[];
-    return Array.isArray(list) ? list.filter((r) => r && typeof r.id === 'string' && ID_RE.test(r.id)).slice(0, 6) : [];
-  } catch {
-    return [];
-  }
-}
-function rememberBoard(id: string) {
-  const list = [{ id, t: Date.now() }, ...loadRecent().filter((r) => r.id !== id)].slice(0, 6);
-  ls.set(KEYS.recent, JSON.stringify(list));
 }
 
 /** Accepts a bare code or a pasted share link. */
@@ -85,8 +71,9 @@ export function App() {
   const inBoard = !!boardId && !!name && passcodeRequired !== null && (!passcodeRequired || !!passcode);
 
   useEffect(() => {
-    document.title = inBoard ? `MathBoard — ${boardId}` : 'MathBoard';
-    if (inBoard && boardId) rememberBoard(boardId);
+    // inside a board the title follows the board's name (see TitleSync in Board.tsx)
+    if (!inBoard) document.title = 'MathBoard';
+    else if (boardId) rememberBoard(boardId);
   }, [inBoard, boardId]);
 
   const onExit = useCallback(() => go(null), [go]);
@@ -193,7 +180,7 @@ function Landing({ boardId, name: name0, passcode: pass0, passcodeRequired, noti
                 <div className="recent-title">Recent boards on this device</div>
                 {recent.map((r) => (
                   <button key={r.id} type="button" disabled={busy} onClick={() => void enter(r.id)}>
-                    <code>{r.id}</code>
+                    <span className="recent-name">{r.title ? <strong>{r.title}</strong> : <em>Untitled</em>}<code>{r.id}</code></span>
                     <span>{new Date(r.t).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</span>
                   </button>
                 ))}

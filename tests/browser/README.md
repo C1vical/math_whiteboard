@@ -11,6 +11,7 @@ node tests/browser/smoke.mjs            # live sync basics, two browsers
 node tests/browser/features.mjs         # every tool, menu and export
 node tests/browser/repaint.mjs          # incremental repaint == full repaint (try DPR=1.5 and DPR=2)
 node tests/browser/resilience.mjs       # starts its own server on :3412 from dist/
+node tests/browser/final.mjs            # board names, images, clipboard, export, toolbar… (Parts B, C)
 ```
 
 - `BASE` — address of the running app (default `http://localhost:3000`).

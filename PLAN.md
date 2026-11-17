@@ -5,19 +5,26 @@
 ```
 shared/   pure TypeScript used by client, server and tests
   types.ts      data model + socket protocol types
+  schema.ts     zod rules for stored objects / pages / notebooks, salvage of damaged files,
+                update validation, clipboard payloads (server and client use the same rules)
   ops.ts        op reducer, page-op reducer, inverse ops (undo)
   geometry.ts   bounds, hit-testing, lasso, object transforms
   ink.ts        perfect-freehand tuning per pen type (one source of truth for live + committed ink)
   erase.ts      partial-eraser stroke splitting
   recognize.ts  conservative shape recognizer + scribble detector
   ruler.ts      ruler / protractor snapping math
-  graph.ts      expression parser (mathjs) + adaptive sampler
+  graph.ts      expression parser (mathjs parser only + own whitelisted evaluator) + sampler
+  ticks.ts      axis tick helpers (no parser, so the axes renderer stays light)
   space.ts      insert/remove-space op builder
-  imageSize.ts  downscale sizing math
+  imageSize.ts  downscale sizing math, multi-image layout
+  exportLayout.ts  PDF sheet layout (fit / Letter / A4, splitting tall pages), background geometry
+  timer.ts      shared countdown state machine
 server/   Express + Socket.IO; one process serves client, API, uploads, websockets
-  app.ts        createApp(): HTTP routes, socket handlers, presence
-  store.ts      in-memory authoritative notebooks, debounced atomic JSON persistence
+  app.ts        createApp(): HTTP routes, socket handlers, presence, rate limits, upload sweep
+  store.ts      notebooks in memory (evicted when idle), salvage on load, per-page persistence,
+                backups, upload quota and orphan sweep
   schema.ts     zod validation for every incoming message
+  limits.ts     in-process rate limiter, client address behind local proxies
 client/   Vite + React 18 (UI chrome only) + a canvas engine
   src/engine/   Engine (camera, 3 stacked canvases, render loop, undo), input/tools,
                 render (strokes/shapes/images/text/tape/axes/graph), sync (socket + pending queue),
@@ -64,18 +71,49 @@ The local live stroke, remote previews and committed strokes all call it with
 Input points are rounded (0.1 px, pressure 0.01) at capture so what is sent is
 exactly what is stored.
 
+## Persistence
+- On disk a notebook is `<id>.json` — a manifest `{format: 2, id, title, updatedAt, pages: [{id, title,
+  background}]}` — plus `<id>.pages/p_<id>.json` per page (`{id, objects, order}`; upper-case letters
+  in the id are escaped so case-insensitive file systems cannot collide). All writes are atomic
+  (temp file + rename); page files are written first, the manifest last.
+- A save rewrites only pages whose content changed. Each page file is assembled from per-object JSON
+  strings cached by object identity (objects are immutable: every change replaces them), and anything
+  not yet cached is serialised in short slices that yield to the event loop. Measured with 20 pages ×
+  5,000 strokes (96 MB of JSON): the old whole-notebook `JSON.stringify` blocked ~815 ms per save; now
+  a save after an edit blocks ~11 ms (median), ~22 ms worst, and the first full write ~45 ms
+  (`npm run perf:save`).
+- Old single-file notebooks load unchanged and are converted by their first save.
+- **Salvage**: a file is validated page by page and object by object; what fails is dropped and
+  logged, and the original is copied to `<file>.corrupt-<time>`.
+- **Backups**: before `restore` (and on the `backup` request that notebook-wide resets send first) the
+  current notebook is written to `<id>.backup-<time>.json` (single-file format; newest five kept).
+- **Rooms** are reference-counted by joined sockets. When the last one leaves, the room is evicted
+  after a delay (5 min) once its save has flushed; a join during eviction cancels it. Recently seen
+  opIds (and a running countdown) outlive the eviction, so re-sent ops are still de-duplicated.
+  Joining an unknown id writes nothing until the first change.
+- **Uploads**: per-notebook byte quota (`UPLOAD_QUOTA_MB`), checked from Content-Length before the body
+  is read and again after; unreferenced files older than 24 h are swept on startup and daily (a
+  notebook that did not load cleanly, or whose damaged copy exists, is never swept; files referenced
+  by backups are kept; deleting an image restarts its file's clock so Undo still works).
+- **Rate limits** (in process, fixed window per client address): wrong passcodes across
+  `/api/passcode`, the socket handshake, `join` and uploads (10 / 5 min), uploads (120 / min).
+
 ## Data model
 As in the spec (section 6), with small additions:
 - `Stroke.stab` (stabilization 0–100) and `Stroke.sim` (simulate pressure: mouse/touch)
   so every client renders the identical outline.
 - `Shape.kind` rect/ellipse store bounds `[x1,y1,x2,y2]` + `rotation`; other kinds store vertices.
 - Optional fields are cleared with `null` in update patches (JSON has no `undefined`).
+- `Notebook.title` is shown and edited in the top bar (`notebookTitle` page op).
+- Every field added later is optional, so older files still validate.
 
 ## Socket protocol
-Client → server: `join` (ack: snapshot), `ops`, `pageop`, `live:start`, `live:points`
-(`reset` flag replaces the preview's points — used for straightened/held strokes),
+Client → server: `join` (ack: snapshot, countdown, server clock), `ops`, `pageop`, `live:start`,
+`live:points` (`reset` flag replaces the preview's points — used for straightened/held strokes),
 `live:end`, `live:erase`, `cursor` (volatile), `laser`, `ruler`, `viewport`, `page`
-(which page I am on), `restore` (upload a full snapshot).
+(which page I am on), `rename` (my display name), `summon` (bring everyone to my page and view, once),
+`timer` (shared countdown actions), `backup` (keep a server copy first), `restore` (upload a full
+snapshot; the server backs up the current one first).
 
 Server → client: `ops {seq, ops, from, t}` to others and `ack {seq, opIds, t}` to the
 sender; `pageop`; `presence`; `snapshot` (after restore); `saved`; relayed live events
@@ -83,6 +121,12 @@ tagged with `userId`.
 
 Op kinds: `add`, `update` (shallow patch), `delete`, `reorder`, plus `move {ids,dx,dy}`
 (an efficient translate used for moving selections and insert-space; commutative).
+Page ops: `add`, `rename`, `duplicate`, `delete`, `reorder`, `setBackground`, `restorePage` (a deleted page
+back with its content at its index — the Undo in the toast) and `notebookTitle`.
+
+Server-side guards: an `update` may only touch fields of the object's own type and the merged object
+must pass the same schema as an `add`; a `move` may not take coordinates outside ±1e9. A refused op is
+not applied or relayed but is still acknowledged, so the sender's queue drains.
 
 - Optimistic: clients apply their own ops immediately; pending ops are kept until acked.
 - Last-writer-wins by server order: when a remote op arrives while I still have unacked
@@ -110,7 +154,28 @@ React renders only the chrome and talks to the engine through a small external s
 - `Sidebar.tsx` — pages list (add, rename, duplicate, delete, drag to reorder)
 - `SelectionBar.tsx` — floating actions for the selection
 - `Inspector.tsx` — graph panel (expressions, sliders, window) and axes panel
-- `Dialogs.tsx` — shortcuts, settings, clear confirms, device restore, backup restore, PDF import
+- `Dialogs.tsx` — shortcuts, settings (incl. my name), clear / reset confirms, export options, device
+  restore, backup restore, PDF import
+- `GraphPanel.tsx` — the graph panel, loaded with the graph code on first use
+
+### Load size
+`shared/graph.ts` used to build mathjs with `create(all)`; it now builds only the parser
+(`parseDependencies`) and evaluates the parsed tree itself, and the graph renderer + panel are loaded
+on first use (`graphLoader.ts`; a placeholder is drawn until then). Main bundle: 1,043 kB (311 kB gzip)
+→ 415 kB (134 kB gzip); the graph chunk is 316 kB (91 kB gzip).
+
+### Clipboard
+Copy puts `mathboard-clip:` + JSON `{v, token, board, objs}` on the system clipboard (≤ 4 MB). Paste in
+the same tab uses the in-memory copy; anything else is validated with `shared/schema.ts`, and images
+from another board are re-uploaded into this one.
+
+### Export
+`exporter.ts` + `shared/exportLayout.ts`. PDF: strokes become filled vector outlines (the same
+perfect-freehand polygon, with its quadratic smoothing as cubic Béziers) and shapes vector paths; other
+objects are embedded per object at ≥ 300 dpi for the paper. Paper: fit to content, Letter or A4 with
+0.5" margins (landscape when that shows it larger); content much taller than a sheet is split across
+portrait sheets at a readable scale, cutting between objects where possible. Tape: covered or left out
+(answer key). Background: white or the page pattern. PNG gets the tape and background options.
 
 Sliders and typing in the graph panel commit continuously but collapse into a single
 undo step (`UndoGroup`).
@@ -124,6 +189,12 @@ All four are implemented and verified end to end in two browser sessions
 - M3 pages, images/paste, backgrounds, laser, insert space, text
 - M4 axes, graph, protractor, scribble erase, tape, replay, follow, PDF import, export,
   focus mode, dark mode, tests, README
+
+## Toolbar at 1280×720
+Graph, axes, tape and image are in one *Insert* flyout; ruler and protractor share a button. With
+more than ten pens they are narrower, the status shows icons only below 1500 px (the words appear
+in a banner over the board), presence chips overlap, and the board name gets 80 px (full name in
+its tooltip). Checked with 15 pens, three people and the sidebar open (tests/browser/final.mjs).
 
 ## Not verified here
 - Real pen hardware, iPad Safari and Firefox: pointer handling was exercised with

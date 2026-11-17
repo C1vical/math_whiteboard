@@ -1,5 +1,5 @@
 import { compileGraph, formatTick, niceStep, sampleFunction, type CompiledGraph } from '../../../shared/graph';
-import type { Axes, Graph } from '../../../shared/types';
+import type { Graph } from '../../../shared/types';
 import type { RenderEnv } from './render';
 
 const FONT = 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
@@ -163,83 +163,4 @@ export function drawGraph(ctx: CanvasRenderingContext2D, g: Graph, x: number, y:
   ctx.roundRect(x, y, w, h, 6);
   ctx.stroke();
   ctx.textAlign = 'left';
-}
-
-function arrow(ctx: CanvasRenderingContext2D, tx: number, ty: number, ang: number, size: number) {
-  ctx.beginPath();
-  ctx.moveTo(tx, ty);
-  ctx.lineTo(tx - size * Math.cos(ang - 0.42), ty - size * Math.sin(ang - 0.42));
-  ctx.lineTo(tx - size * Math.cos(ang + 0.42), ty - size * Math.sin(ang + 0.42));
-  ctx.closePath();
-  ctx.fill();
-}
-
-/** Ticks from min..max, thinning the step if there would be far too many. */
-function ticks(min: number, max: number, step: number): { values: number[]; step: number } {
-  let s = Number.isFinite(step) && step > 0 ? step : niceStep(max - min, 10);
-  while ((max - min) / s > 80) s *= 2;
-  const values: number[] = [];
-  const first = Math.ceil(min / s - 1e-9) * s;
-  for (let v = first; v <= max + s * 1e-9; v += s) values.push(Math.abs(v) < s / 1e6 ? 0 : v);
-  return { values, step: s };
-}
-
-/** Hand-drawable coordinate axes / number line (transparent, so ink goes on top). */
-export function drawAxes(ctx: CanvasRenderingContext2D, a: Axes, x: number, y: number, w: number, h: number, env: RenderEnv) {
-  const color = env.dark ? '#f1f3f5' : '#16181d';
-  ctx.save();
-  ctx.strokeStyle = color;
-  ctx.fillStyle = color;
-  ctx.lineWidth = 2;
-  ctx.lineCap = 'round';
-  ctx.font = `13px ${FONT}`;
-  const head = 10;
-  const tick = 5;
-
-  if (a.mode === 'numberLine') {
-    if (!validRange(a.xMin, a.xMax)) { ctx.restore(); return; }
-    const cy = y + h / 2;
-    ctx.beginPath(); ctx.moveTo(x, cy); ctx.lineTo(x + w, cy); ctx.stroke();
-    arrow(ctx, x + w, cy, 0, head); arrow(ctx, x, cy, Math.PI, head);
-    // keep ticks clear of the arrow heads
-    const pad = 22;
-    const fx = (v: number) => x + pad + ((v - a.xMin) / (a.xMax - a.xMin)) * (w - 2 * pad);
-    const t = ticks(a.xMin, a.xMax, a.xStep);
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'top';
-    ctx.beginPath();
-    for (const v of t.values) { ctx.moveTo(fx(v), cy - tick - 1); ctx.lineTo(fx(v), cy + tick + 1); }
-    ctx.stroke();
-    if (a.showNumbers) for (const v of t.values) ctx.fillText(formatTick(v, t.step), fx(v), cy + tick + 5);
-    ctx.restore();
-    return;
-  }
-
-  if (!validRange(a.xMin, a.xMax) || !validRange(a.yMin, a.yMax)) { ctx.restore(); return; }
-  const fx = (v: number) => x + ((v - a.xMin) / (a.xMax - a.xMin)) * w;
-  const fy = (v: number) => y + h - ((v - a.yMin) / (a.yMax - a.yMin)) * h;
-  const ax = fx(Math.max(a.xMin, Math.min(a.xMax, 0))), ay = fy(Math.max(a.yMin, Math.min(a.yMax, 0)));
-  const ext = 14; // axes extend a little past the last tick, ending in arrows
-  ctx.beginPath();
-  ctx.moveTo(x - ext, ay); ctx.lineTo(x + w + ext, ay);
-  ctx.moveTo(ax, y - ext); ctx.lineTo(ax, y + h + ext);
-  ctx.stroke();
-  arrow(ctx, x + w + ext, ay, 0, head); arrow(ctx, x - ext, ay, Math.PI, head);
-  arrow(ctx, ax, y - ext, -Math.PI / 2, head); arrow(ctx, ax, y + h + ext, Math.PI / 2, head);
-
-  const tx = ticks(a.xMin, a.xMax, a.xStep), ty = ticks(a.yMin, a.yMax, a.yStep);
-  ctx.lineWidth = 1.5;
-  ctx.beginPath();
-  for (const v of tx.values) if (v !== 0 || ax !== fx(0)) { ctx.moveTo(fx(v), ay - tick); ctx.lineTo(fx(v), ay + tick); }
-  for (const v of ty.values) if (v !== 0 || ay !== fy(0)) { ctx.moveTo(ax - tick, fy(v)); ctx.lineTo(ax + tick, fy(v)); }
-  ctx.stroke();
-  if (a.showNumbers) {
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'top';
-    for (const v of tx.values) if (v !== 0) ctx.fillText(formatTick(v, tx.step), fx(v), ay + tick + 3);
-    ctx.textAlign = 'right';
-    ctx.textBaseline = 'middle';
-    for (const v of ty.values) if (v !== 0) ctx.fillText(formatTick(v, ty.step), ax - tick - 4, fy(v));
-  }
-  ctx.restore();
 }

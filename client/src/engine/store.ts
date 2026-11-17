@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from 'react';
-import type { Background, BoardObject, PenType, PresenceUser, RulerState } from '../../../shared/types';
+import type { Background, BoardObject, Crop, PenType, PresenceUser, RulerState, TimerState } from '../../../shared/types';
 
 export type ToolId = 'pen' | 'highlighter' | 'eraser' | 'select' | 'shape' | 'laser' | 'space' | 'text' | 'graph' | 'axes' | 'tape';
 export type ShapeTool = 'line' | 'arrow' | 'doubleArrow' | 'rect' | 'ellipse' | 'triangle' | 'rightTriangle';
@@ -74,11 +74,16 @@ export const defaultSettings = (): Settings => ({
 
 const KEY = 'mathboard.settings.v1';
 
+/** First visit (nothing saved yet): start from the system's light / dark preference. */
+function systemDark(): boolean {
+  try { return typeof matchMedia === 'function' && matchMedia('(prefers-color-scheme: dark)').matches; } catch { return false; }
+}
+
 export function loadSettings(): Settings {
   const d = defaultSettings();
   try {
     const raw = localStorage.getItem(KEY);
-    if (!raw) return d;
+    if (!raw) return { ...d, dark: systemDark() };
     const s = JSON.parse(raw) as Partial<Settings>;
     const merged: Settings = {
       ...d, ...s,
@@ -90,7 +95,7 @@ export function loadSettings(): Settings {
     merged.activeFav = Math.max(0, Math.min(merged.favs.length - 1, merged.activeFav | 0));
     return merged;
   } catch {
-    return d;
+    return { ...d, dark: systemDark() };
   }
 }
 
@@ -106,6 +111,8 @@ export interface SelInfo {
   anyLocked: boolean;
   hasColor: boolean;
   hasSize: boolean;
+  /** the selection contains at least one shape (dashed / fill can be edited) */
+  hasShape: boolean;
   single: BoardObject | null;
 }
 
@@ -120,14 +127,22 @@ export interface TextEdit {
   rotation: number;
 }
 
-export interface Toast { id: number; msg: string; kind: 'info' | 'error' }
+export interface Toast { id: number; msg: string; kind: 'info' | 'error'; action?: { label: string; run: () => void } }
+
+export type ExportKind = 'png' | 'pdf';
+/** an image being cropped: `rect` is the crop in fractions of the whole source image */
+export interface CropEdit { id: string; rect: Crop }
 export interface PageInfo { id: string; title: string; background: Background; count: number }
 
 export interface UIState {
   ready: boolean;
   fatal: string | null;
   tool: ToolId;
+  /** a tool that is active only while a key is held (hold L for the laser) */
+  heldTool: ToolId | null;
   settings: Settings;
+  /** the notebook's name (shown in the top bar, the tab title and export file names) */
+  title: string;
   pages: PageInfo[];
   pageId: string;
   users: PresenceUser[];
@@ -149,7 +164,12 @@ export interface UIState {
   toasts: Toast[];
   restore: { reason: 'empty' | 'older' } | null;
   graphInteract: boolean;
-  dialog: null | 'shortcuts' | 'settings' | 'pdf' | 'clearPage' | 'clearMine' | 'importJson';
+  dialog: null | 'shortcuts' | 'settings' | 'pdf' | 'clearPage' | 'clearMine' | 'importJson' | 'export' | 'resetInk' | 'resetInkAll' | 'coverAll';
+  /** what the export dialog was opened for */
+  exportKind: ExportKind;
+  /** shared countdown timer (server state) */
+  timer: TimerState | null;
+  crop: CropEdit | null;
   /** the file chosen for the 'pdf' / 'importJson' dialogs */
   pendingFile: File | null;
 }
@@ -181,11 +201,11 @@ export function useStore<T, S>(store: Store<T>, selector: (s: T) => S): S {
 
 export function initialUI(name: string, userId: string): UIState {
   return {
-    ready: false, fatal: null, tool: 'pen', settings: loadSettings(), pages: [], pageId: '',
+    ready: false, fatal: null, tool: 'pen', heldTool: null, settings: loadSettings(), title: '', pages: [], pageId: '',
     users: [], me: { sid: '', userId, name, color: '#1971c2' }, conn: 'reconnecting', saving: false, zoom: 1,
     canUndo: false, canRedo: false, sel: null, selBusy: false,
     ruler: { visible: false, kind: 'ruler', x: 0, y: 0, angle: 0 },
     popover: null, textEdit: null, following: null, replay: null, focus: false, toasts: [], restore: null,
-    graphInteract: false, dialog: null, pendingFile: null,
+    graphInteract: false, dialog: null, pendingFile: null, exportKind: 'pdf', timer: null, crop: null,
   };
 }

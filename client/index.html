@@ -3,11 +3,28 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
-    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="description" content="A live pen whiteboard for teaching math together." />
+    <!-- installable: Add to Home Screen opens full screen with this name and icon -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <meta name="application-name" content="MathBoard" />
     <meta name="mobile-web-app-capable" content="yes" />
-    <meta name="theme-color" content="#f6f7f9" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="MathBoard" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+    <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#25272c" media="(prefers-color-scheme: dark)" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/icons/favicon-32.png" />
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%231971c2'/%3E%3Cpath d='M14 44c8-22 12-22 18-8s10 14 18-14' fill='none' stroke='white' stroke-width='6' stroke-linecap='round'/%3E%3C/svg%3E" />
     <title>MathBoard</title>
+    <script>
+      // apply the theme before the first paint (no white flash for dark-mode users)
+      try {
+        var s = JSON.parse(localStorage.getItem('mathboard.settings.v1') || 'null');
+        var dark = s && typeof s.dark === 'boolean' ? s.dark : window.matchMedia('(prefers-color-scheme: dark)').matches;
+        document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+      } catch (e) { /* storage blocked: the app sets the theme when it starts */ }
+    </script>
   </head>
   <body>
     <div id="root"></div>

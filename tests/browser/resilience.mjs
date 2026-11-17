@@ -166,7 +166,9 @@ await step('selection: resize by corner, rotate, lock, duplicate, copy/paste, z-
 });
 
 await step('protractor: stroke from the centre snaps to a whole-degree ray', async () => {
-  await A.click('.toolbar .ibtn[aria-label="Protractor"]');
+  // ruler and protractor share one toolbar button with a small chooser (toolbar fits 1280×720)
+  await A.click('.toolbar .ibtn[aria-label^="Ruler (R)"], .toolbar .ibtn[aria-label^="Hide the"]');
+  await A.click('.popover .menu-item:has-text("Protractor")');
   await A.waitForTimeout(100);
   const [cx, cy] = await st(A, () => { const e = window.mathboard; const r = e.ui.get().ruler; return e.toScreen(r.x, r.y); });
   await shot(A, '32-protractor');
@@ -180,11 +182,12 @@ await step('protractor: stroke from the centre snaps to a whole-degree ray', asy
   const p = o.points; const ang = (Math.atan2(-(p[p.length - 2] - p[1]), p[p.length - 3] - p[0]) * 180) / Math.PI;
   if (Math.abs(ang - Math.round(ang)) > 0.05) throw new Error('angle ' + ang);
   log('   ray angle', ang.toFixed(2));
-  await A.click('.toolbar .ibtn[aria-label="Protractor"]');
+  await A.click('.toolbar .ibtn[aria-label^="Ruler (R)"], .toolbar .ibtn[aria-label^="Hide the"]'); // hides it
 });
 
 await step('ruler rotate knob is on screen and rotates', async () => {
-  await A.click('.toolbar .ibtn[aria-label="Ruler (R)"]');
+  await A.click('.toolbar .ibtn[aria-label^="Ruler (R)"], .toolbar .ibtn[aria-label^="Hide the"]');
+  await A.click('.popover .menu-item:has-text("Ruler")');
   const k = await st(A, () => { const e = window.mathboard; const r = e.ui.get().ruler; const a = r.angle * Math.PI / 180; return e.toScreen(r.x + 210 * Math.cos(a) - 4 * Math.sin(a), r.y + 210 * Math.sin(a) + 4 * Math.cos(a)); });
   if (k[0] < 0 || k[0] > box.width) throw new Error('knob off-screen ' + k);
   await A.mouse.move(X(k[0]), Y(k[1])); await A.mouse.down();
@@ -193,7 +196,7 @@ await step('ruler rotate knob is on screen and rotates', async () => {
   if (Math.abs(ang) < 20) throw new Error('angle ' + ang);
   log('   ruler angle', ang);
   await shot(A, '33-ruler-rotated');
-  await A.click('.toolbar .ibtn[aria-label="Ruler (R)"]');
+  await A.click('.toolbar .ibtn[aria-label^="Ruler (R)"], .toolbar .ibtn[aria-label^="Hide the"]'); // hides it
   if (await st(A, () => window.mathboard.ui.get().ruler.visible)) throw new Error('ruler still visible');
 });
 
@@ -222,7 +225,10 @@ await step('PDF import (2 pages → new board pages)', async () => {
   await A.keyboard.press('1');
   await A.mouse.move(X(300), Y(300)); await A.mouse.down(); await A.mouse.move(X(500), Y(380), { steps: 5 }); await A.mouse.up();
   await A.click('.topright .ibtn[aria-label="Menu"]');
-  const [dl] = await Promise.all([A.waitForEvent('download'), A.click('.menu-item:has-text("Export notebook as PDF")')]);
+  await A.click('.menu-item:has-text("Export as PDF")');
+  await A.click('.segmented button:has-text("Whole notebook")');
+  await A.click('.segmented button:has-text("Fit to content")');
+  const [dl] = await Promise.all([A.waitForEvent('download'), A.click('.dialog-actions .btn.primary')]);
   const pdfPath = path.join(OUT, 'adv.pdf');
   await dl.saveAs(pdfPath);
   await A.click('.topright .ibtn[aria-label="Menu"]');

@@ -1,5 +1,5 @@
 import { io, type Socket } from 'socket.io-client';
-import type { JoinAck, Notebook, Op, PageOp, PresenceUser } from '../../../shared/types';
+import type { JoinAck, Notebook, Op, PageOp, PresenceUser, TimerState } from '../../../shared/types';
 
 export type PendingItem = { type: 'ops'; ops: Op[] } | { type: 'page'; op: PageOp };
 
@@ -10,6 +10,8 @@ export interface SyncHandlers {
   onRemotePageOp(op: PageOp): void;
   onPresence(users: PresenceUser[]): void;
   onJoined(me: { sid: string; color: string }): void;
+  /** the shared countdown changed (or was received on join) */
+  onTimer(timer: TimerState | null): void;
   onStatus(): void;
   onFatal(reason: string): void;
   onLive(event: string, data: any): void;
@@ -17,7 +19,7 @@ export interface SyncHandlers {
 
 export interface SyncOptions { notebookId: string; userId: string; name: string; color?: string; passcode: string }
 
-const LIVE_EVENTS = ['live:start', 'live:points', 'live:end', 'live:erase', 'cursor', 'laser', 'ruler', 'viewport', 'leave'];
+const LIVE_EVENTS = ['live:start', 'live:points', 'live:end', 'live:erase', 'cursor', 'laser', 'ruler', 'viewport', 'summon', 'leave'];
 const MAX_OPS_PER_MSG = 600;
 const MAX_NUMBERS_PER_MSG = 150000;
 
@@ -30,6 +32,8 @@ export class Sync {
   /** newest server timestamp we know of, and the newest one the server confirmed on disk */
   latestT = 0;
   savedT = 0;
+  /** server clock minus this device's clock, so countdowns agree on every screen */
+  clockOffset = 0;
   private first = true;
   private offlineTimer = 0;
   private closed = false;
@@ -59,6 +63,7 @@ export class Sync {
       this.seen(m.t);
       this.h.onSnapshot(m.notebook, { first: false, pending: this.pending, restoredBy: m.by });
     });
+    s.on('timer', (m: { timer: TimerState | null; now: number }) => { this.clock(m.now); this.h.onTimer(m.timer); });
     for (const ev of LIVE_EVENTS) s.on(ev, (data: unknown) => this.h.onLive(ev, data));
     window.addEventListener('offline', this.onOffline);
     window.addEventListener('online', this.onOnline);
@@ -72,6 +77,13 @@ export class Sync {
     this.conn = c;
     this.h.onStatus();
   }
+
+  private clock(serverNow: number | undefined) {
+    if (typeof serverNow === 'number') this.clockOffset = serverNow - Date.now();
+  }
+
+  /** the server's clock, as well as this device can tell */
+  serverNow(): number { return Date.now() + this.clockOffset; }
 
   private seen(t: number) {
     if (t > this.latestT) this.latestT = t;
@@ -101,6 +113,8 @@ export class Sync {
       if (ack.seen?.length) this.removeAcked(new Set(ack.seen));
       this.opts.color = ack.color;
       this.h.onJoined({ sid: ack.sid!, color: ack.color! });
+      this.clock(ack.now);
+      this.h.onTimer(ack.timer ?? null);
       if (ack.users) this.h.onPresence(ack.users);
       const t = ack.notebook.updatedAt;
       if (this.first) { this.latestT = this.savedT = t; } else if (t > this.latestT) this.latestT = t;
@@ -171,6 +185,20 @@ export class Sync {
   emit(event: string, data: unknown, volatile = false) {
     if (!this.joined) return;
     if (volatile) this.socket.volatile.emit(event, data); else this.socket.emit(event, data);
+  }
+
+  /** My display name changed: tell everyone now, and use it for future re-joins. */
+  setName(name: string) {
+    this.opts.name = name;
+    this.emit('rename', { name });
+  }
+
+  /** Asks the server to keep a backup copy of the notebook as it is now. Resolves false if it could not. */
+  backup(): Promise<boolean> {
+    return new Promise((resolve) => {
+      if (!this.joined) { resolve(false); return; }
+      this.socket.timeout(30000).emit('backup', {}, (err: unknown, res?: { ok: boolean }) => resolve(!err && !!res?.ok));
+    });
   }
 
   restore(nb: Notebook): Promise<boolean> {

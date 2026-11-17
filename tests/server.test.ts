@@ -282,6 +282,79 @@ describe('server integration', () => {
     a.close(); b.close();
   });
 
+  it('board names: notebookTitle syncs live and is saved', async () => {
+    const dir = tmp();
+    let srv = await createApp({ port: 0, dataDir: dir, quiet: true, sweepUploads: false });
+    const a = await client(srv.port), b = await client(srv.port);
+    await join(a, 'named', 'A');
+    expect((await join(b, 'named', 'B')).notebook!.title).toBe('Untitled notebook');
+    const got = once<{ op: { kind: string; title: string } }>(b, 'pageop');
+    const saved = once(a, 'saved');
+    a.emit('pageop', { op: { opId: 'nt1', kind: 'notebookTitle', title: 'Algebra 2' } });
+    expect((await got).op).toMatchObject({ kind: 'notebookTitle', title: 'Algebra 2' });
+    await saved;
+    // invalid titles are dropped
+    let leaked = false;
+    b.on('pageop', () => { leaked = true; });
+    a.emit('pageop', { op: { opId: 'nt2', kind: 'notebookTitle', title: '' } });
+    a.emit('pageop', { op: { opId: 'nt3', kind: 'notebookTitle', title: 'x'.repeat(121) } });
+    await wait(100);
+    expect(leaked).toBe(false);
+    a.close(); b.close();
+    await srv.close();
+    srv = await createApp({ port: 0, dataDir: dir, quiet: true, sweepUploads: false });
+    const c = await client(srv.port);
+    expect((await join(c, 'named', 'C')).notebook!.title).toBe('Algebra 2');
+    c.close();
+    await srv.close();
+  });
+
+  it('a deleted page comes back whole, at its old position, for everyone (restorePage)', async () => {
+    const a = await client(app.port), b = await client(app.port);
+    const ja = await join(a, 'undelete', 'A');
+    await join(b, 'undelete', 'B');
+    const p1 = ja.notebook!.pages[0].id;
+    a.emit('pageop', { op: { opId: 'add2', kind: 'add', page: { id: 'two', title: 'Two', background: 'dots' }, index: 1 } });
+    const ack = once(a, 'ack');
+    a.emit('ops', { ops: [addOp('two', mkStroke('keep', [1, 1, 0.5, 5, 5, 0.5]))] });
+    await ack;
+    const page = { id: 'two', title: 'Two', background: 'dots', objects: { keep: mkStroke('keep', [1, 1, 0.5, 5, 5, 0.5]) }, order: ['keep'] };
+    let got = once<{ op: { kind: string } }>(b, 'pageop');
+    a.emit('pageop', { op: { opId: 'del2', kind: 'delete', pageId: 'two' } });
+    expect((await got).op.kind).toBe('delete');
+    got = once(b, 'pageop');
+    a.emit('pageop', { op: { opId: 'back2', kind: 'restorePage', page, index: 1 } });
+    expect((await got).op.kind).toBe('restorePage');
+    const c = await client(app.port);
+    const nb = (await join(c, 'undelete', 'C')).notebook!;
+    expect(nb.pages.map((p) => p.id)).toEqual([p1, 'two']);
+    expect(nb.pages[1].objects.keep).toBeTruthy();
+    // a page with an invalid object is refused
+    let leaked = false;
+    b.on('pageop', () => { leaked = true; });
+    a.emit('pageop', { op: { opId: 'bad', kind: 'restorePage', page: { ...page, id: 'three', objects: { k: { ...mkStroke('k', [0, 0, 0.5]), size: -1 } }, order: ['k'] }, index: 0 } });
+    await wait(100);
+    expect(leaked).toBe(false);
+    a.close(); b.close(); c.close();
+  });
+
+  it('rename: a new display name reaches everyone at once and survives a re-join', async () => {
+    const a = await client(app.port), b = await client(app.port);
+    await join(a, 'names', 'Ann');
+    await join(b, 'names', 'Bob');
+    const renamed = new Promise<any[]>((res) => b.on('presence', (u) => { if (u.some((x: any) => x.name === 'Annie')) res(u); }));
+    a.emit('rename', { name: '  Annie  ' });
+    const users = await renamed;
+    expect(users.find((u: any) => u.sid === a.id).name).toBe('Annie');
+    let changed = false;
+    b.on('presence', () => { changed = true; });
+    a.emit('rename', { name: '' });
+    a.emit('rename', { name: 'x'.repeat(41) });
+    await wait(100);
+    expect(changed).toBe(false);
+    a.close(); b.close();
+  });
+
   it('presence follows joins, page changes and disconnects; transient events are relayed', async () => {
     const a = await client(app.port), b = await client(app.port);
     await join(a, 'pres', 'Ann');
@@ -305,6 +378,9 @@ describe('server integration', () => {
     const viewport = once<any>(a, 'viewport');
     b.emit('viewport', { pageId: 'pageX', camera: { x: 0, y: 0, zoom: 2 }, vw: 800, vh: 600 });
     expect((await viewport).camera.zoom).toBe(2);
+    const summon = once<any>(a, 'summon');
+    b.emit('summon', { pageId: 'pageX', camera: { x: 10, y: 20, zoom: 1.5 }, vw: 1280, vh: 720 });
+    expect(await summon).toMatchObject({ pageId: 'pageX', camera: { zoom: 1.5 }, sid: b.id });
     const erase = once<any>(a, 'live:erase');
     b.emit('live:erase', { pageId: 'pageX', x: 1, y: 1, r: 10, active: true });
     expect((await erase).r).toBe(10);

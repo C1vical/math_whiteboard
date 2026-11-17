@@ -109,7 +109,8 @@ button:disabled { cursor: default; }
 .layer-bg, .layer-main { pointer-events: none; }
 
 /* ---------- toolbar ---------- */
-.toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 1px; flex: 1; min-width: 0; }
+/* the tools only wrap once the board name (top right) has shrunk as far as it can */
+.toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 1px; flex: 1 0.001 auto; min-width: 0; }
 .sep { width: 1px; height: 24px; background: var(--border); margin: 0 3px; flex: none; }
 
 .ibtn {
@@ -181,7 +182,8 @@ button:disabled { cursor: default; }
 .focusbar::-webkit-scrollbar { display: none; }
 
 /* ---------- top-right cluster ---------- */
-.topright { display: flex; align-items: center; gap: 5px; flex: none; min-height: 40px; }
+.topright { display: flex; align-items: center; gap: 5px; flex: 0 1 auto; min-width: 0; min-height: 40px; }
+.topright > * { flex: none; }
 .users { display: flex; align-items: center; gap: 4px; }
 .user-chip {
   display: inline-flex;
@@ -232,23 +234,39 @@ button.user-chip:hover { background: var(--hover); }
 @keyframes pulse { 50% { opacity: 0.35; } }
 
 .save-ind { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--muted); white-space: nowrap; min-width: 62px; }
+.save-ind.saving:not(.connected) { color: var(--warn); }
 .save-ind.saving { color: var(--text); }
 
 .status { display: inline-flex; align-items: center; gap: 6px; }
 
+/* a long row of pens (more than ten) gets narrower buttons so the bar stays on one row */
+.favs.many { gap: 0; }
+.favs.many .fav { width: 28px; }
+.favs.many .fav svg { transform: translateY(3px) scale(0.88); }
+.favs.many .fav.active svg { transform: translateY(-1px) scale(0.88); }
+
 @media (max-width: 1500px) {
-  /* fixed width: the toolbar must not reflow (and shift the board) when the connection drops */
-  .status { width: 116px; flex: none; }
-  .status .pill:not(.connected) { flex: 1; padding: 0 8px; }
-  .status .pill:not(.connected) + .save-ind { display: none; }
-  .pill.connected .label { display: none; }
-  .pill.connected { padding: 0 9px; }
+  /* icons only, at a fixed width: the toolbar must not reflow (and shift the board) when the
+     connection drops; the words appear in a banner over the board instead */
+  .status { width: 48px; flex: none; gap: 4px; }
+  .pill .label { display: none; }
+  .pill { padding: 0 9px; }
   .user-chip .uname { display: none; }
   .user-chip { padding-right: 7px; gap: 4px; }
   .user-chip.here .upage { display: none; }
   .user-chip.here { padding-right: 3px; }
+  .users { gap: 0; }
+  .users > .user-chip + .user-chip { margin-left: -5px; }
+  .user-chip .avatar { box-shadow: 0 0 0 2px var(--panel); }
   .share-btn span { display: none; }
   .share-btn { padding: 0 11px; }
+  .save-ind .label { display: none; }
+  .save-ind { min-width: 0; }
+  .board-title { max-width: 150px; }
+  /* with a long row of pens every pixel counts: the name gets less room (full name in its tooltip and the tab title) */
+  .topbar:has(.favs.many) .board-title { max-width: 80px; }
+  .topbar:has(.favs.many) .toolbar { gap: 0; }
+  .topbar:has(.favs.many) .sep { margin: 0 2px; }
 }
 
 /* ---------- buttons & form controls ---------- */
@@ -568,6 +586,34 @@ kbd {
 .menu-item.danger { color: var(--danger); }
 .menu-item .key { margin-left: auto; color: var(--muted); font-size: 12px; }
 .menu-sep { height: 1px; margin: 5px 0; background: var(--border); }
+.menu-item.on { background: var(--accent-soft); color: var(--accent); }
+.menu-title { padding: 4px 10px 2px; font-size: 11px; font-weight: 650; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
+.menu-inset { padding: 0 10px 4px 38px; }
+
+/* the board's name, in the top bar */
+.topright > .board-title { flex: 0 1 auto; min-width: 44px; }
+.board-title {
+  display: inline-flex;
+  align-items: center;
+  height: 32px;
+  max-width: 220px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  font-weight: 650;
+  font-size: 13.5px;
+  white-space: nowrap;
+}
+.board-title span { overflow: hidden; text-overflow: ellipsis; }
+.board-title:hover:not(:disabled) { background: var(--hover); border-color: var(--border); }
+.board-title.unnamed { color: var(--muted); font-weight: 500; font-style: italic; }
+.spin { animation: spin 0.9s linear infinite; }
+
+.export-form { display: flex; flex-direction: column; gap: 12px; }
+.export-form .segmented { width: 100%; }
+.export-form .segmented button { flex: 1; }
+.name-row { display: flex; flex-direction: column; gap: 6px; }
 
 .bg-options { display: grid; grid-template-columns: repeat(5, 1fr); gap: 5px; }
 .bg-options button {
@@ -683,6 +729,22 @@ kbd {
   white-space: nowrap;
 }
 .app-focus .banner { top: 64px; }
+.banners {
+  position: absolute;
+  left: 50%;
+  top: 12px;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  z-index: 16;
+  pointer-events: none;
+}
+.banners.below-focusbar { top: 64px; }
+.banners .banner { position: static; transform: none; pointer-events: auto; }
+.banner.conn { background: var(--warn); color: #1c1f24; padding-right: 14px; }
+.banner.conn.offline { background: var(--danger); color: #fff; }
 .banner button { height: 24px; padding: 0 9px; border: none; border-radius: 12px; background: rgba(255, 255, 255, 0.25); color: #fff; font-size: 12px; }
 
 .text-edit {
@@ -735,7 +797,20 @@ kbd {
   width: max-content;
   max-width: calc(100vw - 24px);
 }
-.toast { padding: 9px 14px; border-radius: 10px; background: #23262b; color: #fff; font-size: 13px; box-shadow: var(--shadow); max-width: 100%; }
+.toast { display: flex; align-items: center; gap: 12px; padding: 9px 14px; border-radius: 10px; background: #23262b; color: #fff; font-size: 13px; box-shadow: var(--shadow); max-width: 100%; }
+.toast-action {
+  pointer-events: auto;
+  flex: none;
+  height: 28px;
+  padding: 0 12px;
+  border: none;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.18);
+  color: inherit;
+  font-weight: 650;
+}
+.toast-action:hover { background: rgba(255, 255, 255, 0.3); }
+:root[data-theme='dark'] .toast-action { background: rgba(0, 0, 0, 0.12); }
 :root[data-theme='dark'] .toast { background: #e9ecef; color: #16181d; }
 .toast.error { background: #c92a2a; color: #fff; }
 
@@ -810,7 +885,11 @@ kbd {
 }
 .recent button:hover { background: var(--hover); }
 .recent button code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-.recent button span { color: var(--muted); font-size: 12px; }
+.recent button > span:last-child { color: var(--muted); font-size: 12px; flex: none; }
+.recent-name { display: flex; align-items: baseline; gap: 8px; min-width: 0; overflow: hidden; }
+.recent-name strong, .recent-name em { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.recent-name em { color: var(--muted); font-weight: 400; }
+.recent-name code { flex: none; color: var(--muted); font-size: 12px !important; }
 
 .crash { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 24px; text-align: center; background: var(--bg); }
 .crash pre { max-width: 640px; max-height: 30vh; overflow: auto; padding: 10px; border-radius: 8px; background: var(--panel-2); font-size: 12px; text-align: left; white-space: pre-wrap; }

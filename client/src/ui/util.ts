@@ -13,6 +13,35 @@ export const ls = {
   },
 };
 
+export interface RecentBoard { id: string; t: number; title?: string }
+const RECENT_KEY = 'mathboard.recent';
+const BOARD_ID = /^[A-Za-z0-9_-]{1,64}$/;
+
+/** Boards opened on this device, newest first. */
+export function loadRecent(): RecentBoard[] {
+  try {
+    const list = JSON.parse(ls.get(RECENT_KEY) ?? '[]') as RecentBoard[];
+    if (!Array.isArray(list)) return [];
+    return list
+      .filter((r) => r && typeof r.id === 'string' && BOARD_ID.test(r.id))
+      .map((r) => ({ id: r.id, t: Number(r.t) || 0, ...(typeof r.title === 'string' && r.title ? { title: r.title.slice(0, 120) } : {}) }))
+      .slice(0, 8);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Puts a board at the top of the recent list. `title` refreshes the stored name; leaving it
+ * out keeps whatever name is already known for that board.
+ */
+export function rememberBoard(id: string, title?: string) {
+  const old = loadRecent();
+  const known = title ?? old.find((r) => r.id === id)?.title;
+  const list = [{ id, t: Date.now(), ...(known ? { title: known } : {}) }, ...old.filter((r) => r.id !== id)].slice(0, 8);
+  ls.set(RECENT_KEY, JSON.stringify(list));
+}
+
 /** Copies text to the system clipboard, with a fallback for non-secure origins (e.g. a LAN IP). */
 export async function copyText(text: string): Promise<boolean> {
   try {

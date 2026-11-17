@@ -9,6 +9,7 @@ cover the answer with tape and reveal it.
 - Live strokes, cursors, laser pointer, ruler and protractor shared with everyone on the board
 - Pages, images (paste / drop / PDF import), text boxes, shapes, axes, a graphing calculator
 - Per-user undo, lasso select, both kinds of eraser, ink-to-shape, draw-and-hold
+- Named boards, PDF export on Letter / A4 with an answer-key option, installable on an iPad home screen
 - No accounts, no database, no paid services: one Node process and a folder of JSON files
 
 ## Quick start
@@ -30,18 +31,42 @@ npm run build
 npm start          # http://localhost:3000
 ```
 
-Other scripts: `npm test` (unit + server integration tests), `npm run typecheck`.
+Other scripts: `npm test` (unit + server integration tests), `npm run typecheck`, `npm run perf:save`
+(how long a save blocks the server with a 20-page, 100,000-stroke notebook). Browser checks are in
+[tests/browser](./tests/browser/README.md). GitHub Actions runs tests, typecheck and build on every push.
 
 ### Environment variables
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `PORT` | `3000` | Port the server listens on. |
-| `DATA_DIR` | `./data` | Where notebooks (`<id>.json`) and `uploads/` are stored. |
+| `DATA_DIR` | `./data` | Where notebooks and `uploads/` are stored (see *Your data on disk*). |
 | `APP_PASSCODE` | *(unset)* | If set, everyone must enter this passcode to open any board or upload an image. It is remembered in the browser after the first success. |
+| `UPLOAD_QUOTA_MB` | `500` | Most image storage one board may use. Above it, uploads are refused with a message saying so. |
+| `TRUST_PROXY` | `true` | Rate limits count per visitor address. Behind cloudflared or a hosting proxy on the same machine / network the visitor's address comes from `X-Forwarded-For`; set `false` if nothing sits in front of the server. |
 
 Anyone who has a board's link can open it, so set `APP_PASSCODE` whenever the server is reachable
-from the internet.
+from the internet. Wrong passcodes are limited to 10 per address every 5 minutes (on the start page,
+the board connection and uploads together), so the passcode cannot be guessed by trying many.
+Image uploads are limited to 120 per minute per address.
+
+### Your data on disk
+
+- Each board is `DATA_DIR/<code>.json` (its name and list of pages) plus one file per page in
+  `DATA_DIR/<code>.pages/`. A save rewrites only the pages that changed. Boards saved by older
+  versions (a single `<code>.json`) open as they are and are converted the first time they change.
+- **Nothing is lost to one bad object.** If a file was damaged (by hand-editing, a full disk…),
+  everything valid in it still opens; only the broken objects are left out, they are listed in the
+  server log, and the original file is kept next to it as `<file>.corrupt-<date>`.
+- **Backups before big changes.** Before *Restore from a backup* or *Restore from this device*
+  replaces a board, and before the notebook-wide *Clear ink* / *Cover all tape*, the server writes
+  `DATA_DIR/<code>.backup-<date>.json` (the newest five are kept per board). To go back to one,
+  stop the server and copy it over `<code>.json`.
+- Images live in `DATA_DIR/uploads/<code>/`. Images no board refers to any more (and none of its
+  backups) are deleted after a day, on startup and then daily. A board that did not open cleanly is
+  never swept.
+- Boards nobody has open are dropped from memory after five minutes (once saved). Opening a link
+  to a board that does not exist creates nothing on disk until something is drawn.
 
 ## Sharing it with your co-teacher
 
@@ -140,8 +165,10 @@ The image stores everything in `/data`; keep that on a volume.
   current eraser mode without switching tools. Hold the **barrel button** while dragging to lasso;
   release and drag the selection to move it.
 - **iPad + Apple Pencil (Safari):** the pencil draws, one finger pans, two fingers pinch-zoom. Once a
-  pen has been used, fingers never draw (palm rejection). Add the page to the Home Screen for a
-  full-screen board.
+  pen has been used, fingers never draw (palm rejection).
+- **Install it on the iPad:** in Safari tap **Share → Add to Home Screen**. It gets the MathBoard
+  icon and opens full screen without Safari's bars, on the start page with your recent boards
+  (each listed with its name). Chrome and Edge on a computer offer *Install* in the address bar too.
 - **Touch only (no pen):** turn on **☰ → Settings → Draw with finger**. Two fingers still pan and
   zoom.
 - **Mouse:** left button draws, middle-drag or Space+drag pans, the wheel scrolls, Shift+wheel
@@ -178,10 +205,14 @@ Press **?** in the app for this list.
 | E | Eraser (press again to switch stroke / partial) |
 | V or S | Lasso select |
 | R | Ruler on / off (re-opens the ruler or protractor, whichever was used last) |
+| Shift+P | Protractor on / off |
 | Shift+R | Shapes |
 | L | Laser pointer |
 | T | Text |
 | G | Graph |
+| A | Axes (press again to switch between x–y axes and a number line) |
+| K | Tape |
+| I | Insert / remove space |
 | [ / ] | Thinner / thicker |
 | F | Focus mode |
 | Delete | Delete selection |
@@ -200,7 +231,10 @@ Press **?** in the app for this list.
 
 ### A typical class
 
+0. **Name the board** — click *Untitled* at the top right (e.g. "Algebra 2 — Period 3"). The name
+   shows in the browser tab, in *Recent boards* on the start page and in exported file names.
 1. **New page per question** — *Add page* in the sidebar (double-click a title to rename it).
+   Deleted a page by mistake? Click **Undo** in the message that appears (about ten seconds).
 2. **Paste the homework** — copy a screenshot (Snipping Tool, Cmd+Shift+4…) and press Ctrl/Cmd+V.
    It lands in the middle of the view for both of you and is **locked**, so writing on it never
    moves it. (To move or delete it: lasso tool → click it → unlock.)
@@ -210,8 +244,15 @@ Press **?** in the app for this list.
 5. **Tape over the answer** — draw a tape strip across it; click the tape to reveal it for
    everyone ("try it first, then we'll check").
 6. Need more room in the middle of a solution? **Insert space** and drag down.
-7. After class: **☰ → Export notebook as PDF** for the students, **Back up notebook** for you, and
-   **Replay this page's ink** to review a solution step by step.
+7. After class: **☰ → Export as PDF…** for the students — this page or the whole notebook, sized
+   to the content or on Letter / A4 (tall pages continue on more sheets instead of shrinking), with
+   the answers still covered or an answer-key copy, on white or on the page's grid. Ink stays sharp
+   when the PDF is zoomed. **Back up notebook** for you, and **Replay this page's ink** to review a
+   solution step by step.
+
+Other handy things: **select → copy** (Ctrl/Cmd+C) and paste into another tab or another board —
+images come along. Select a shape to change its dashes, fill colour and fill opacity. Change your
+name in **☰ → Settings**; everyone sees it at once. Dark mode starts from your system setting.
 
 ## How it works (short version)
 
@@ -230,8 +271,9 @@ See [PLAN.md](./PLAN.md) for the architecture, protocol and rendering strategy.
 - Conflicts are last-writer-wins per object. Two people can always draw at once, but if both move
   or edit the *same* object in the same instant, the later change wins.
 - Undo history is per browser tab and is not kept across a page reload.
-- The in-app clipboard (copy / paste of board objects) works within one tab; images and text paste
-  in from anywhere.
-- Pages are infinite canvases, so the PDF export fits each page's content to one PDF page.
+- Copied board objects travel through the system clipboard as text (up to about 4 MB, e.g. a few
+  thousand strokes); a larger selection still pastes within the same tab.
+- In the PDF, ink and shapes are vector paths; images, text, graphs, axes and tape are embedded as
+  pictures at print resolution (300 dpi or more, never above the image's own resolution).
 - Anyone with a board link (and the passcode, if set) can edit — there are no view-only links.
   Students are expected to watch the Zoom share.

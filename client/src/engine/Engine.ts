@@ -3,16 +3,19 @@ import {
   bboxIntersects, frameCorners, frameOf, matApply, objBounds, setTextMeasurer, translateObject, unionBounds,
   LINE_H, type Frame, type Mat,
 } from '../../../shared/geometry';
-import { placeImage } from '../../../shared/imageSize';
+import { cascade, placeImage, placeImages, type Rect } from '../../../shared/imageSize';
 import { applyOp, applyPageOp, applyWithInverse, findPage, newNotebook, notebookIsEmpty, type ApplyHooks } from '../../../shared/ops';
 import { protractorAngle } from '../../../shared/ruler';
-import type {
-  Background, BBox, BoardObject, Camera, ImageObj, Notebook, Op, Page, PageOp, PresenceUser, RulerState, StrokeStyle,
+import {
+  CLIP_MAX_CHARS, CLIP_PREFIX, DEFAULT_TITLE,
+  type Background, type BBox, type BoardObject, type Camera, type ImageObj, type Notebook, type Op, type Page, type PageOp, type PresenceUser,
+  type RulerState, type StrokeStyle,
 } from '../../../shared/types';
+import { loadGraph, onGraphLoaded } from './graphLoader';
 import { getCachedNotebook, putCachedNotebook } from './idb';
-import { ImageCache, prepareImage, uploadImage } from './images';
+import { ImageCache, prepareImage, uploadImage, type PreparedImage } from './images';
 import { drawCursor, drawLaser, drawRuler, LASER_MS, type LaserPoint } from './overlay';
-import { carryPath, drawBackground, drawLiveStroke, drawObject, drawTape, FONT, type RenderEnv } from './render';
+import { carryPath, drawBackground, drawLiveStroke, drawObject, drawTape, FONT, paintBounds, type RenderEnv } from './render';
 import { saveSettings, type PenFav, type Settings, type Store, type ToolId, type UIState } from './store';
 import { Sync, type PendingItem } from './sync';
 import { Input } from './tools';
@@ -83,6 +86,7 @@ export class Engine {
   private ro: ResizeObserver;
   private dprQuery: MediaQueryList | null = null;
   private destroyed = false;
+  private offGraph: () => void;
   private hooks: ApplyHooks = { moved: carryPath };
   private toastId = 1;
   private textKey = 0;
@@ -112,6 +116,7 @@ export class Engine {
     });
 
     this.images = new ImageCache(() => { this.dirtyMain = true; this.requestFrame(); });
+    this.offGraph = onGraphLoaded(() => { if (!this.destroyed) this.invalidateMain(); });
     this.env = {
       dark: ui.get().settings.dark,
       getImage: (src) => (src.startsWith('local:') ? this.placeholders.get(src.slice(6))?.drawable ?? null : this.images.get(src)),
@@ -130,6 +135,7 @@ export class Engine {
       onRemotePageOp: (op) => this.onRemotePageOp(op),
       onPresence: (users) => this.onPresence(users),
       onJoined: (me) => ui.set((s) => ({ me: { ...s.me, ...me } })),
+      onTimer: (timer) => ui.set({ timer }),
       onStatus: () => ui.set({ conn: this.sync.conn, saving: this.sync.saving }),
       onFatal: (reason) => ui.set({ fatal: reason }),
       onLive: (ev, data) => this.onLive(ev, data),
@@ -138,6 +144,7 @@ export class Engine {
 
   destroy() {
     this.destroyed = true;
+    this.offGraph();
     cancelAnimationFrame(this.raf);
     window.clearTimeout(this.cacheTimer);
     this.flushCache();
@@ -167,10 +174,14 @@ export class Engine {
     this.requestFrame();
   }
 
-  toast(msg: string, kind: 'info' | 'error' = 'info') {
+  /** Shows a short message. `action` adds a button (e.g. Undo); the toast closes when it is used. */
+  toast(msg: string, kind: 'info' | 'error' = 'info', opts: { action?: { label: string; run: () => void }; ms?: number } = {}): number {
     const id = this.toastId++;
-    this.ui.set((s) => ({ toasts: [...s.toasts, { id, msg, kind }] }));
-    window.setTimeout(() => this.ui.set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })), kind === 'error' ? 6000 : 3200);
+    const close = () => this.ui.set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) }));
+    const action = opts.action && { label: opts.action.label, run: () => { close(); opts.action!.run(); } };
+    this.ui.set((s) => ({ toasts: [...s.toasts, { id, msg, kind, action }] }));
+    window.setTimeout(close, opts.ms ?? (kind === 'error' ? 6000 : 3200));
+    return id;
   }
 
   toScreen = (x: number, y: number): [number, number] => [(x - this.cam.x) * this.cam.zoom, (y - this.cam.y) * this.cam.zoom];
@@ -488,11 +499,7 @@ export class Engine {
   }
 
   /** Painted extent of an object: its bounds plus whatever its rendering can spill over them. */
-  private paintBounds(o: BoardObject): BBox {
-    const b = objBounds(o);
-    const p = o.type === 'stroke' ? Math.min(PAINT_SPILL, o.size + 2) : o.type === 'axes' ? 48 : 4;
-    return [b[0] - p, b[1] - p, b[2] + p, b[3] + p];
-  }
+  private paintBounds(o: BoardObject): BBox { return paintBounds(o); }
 
   /**
    * Union of the painted bounds of everything `ops` refer to on the current page, as the
@@ -708,6 +715,7 @@ export class Engine {
         anyLocked: objs.some((o) => o.locked),
         hasColor: objs.some((o) => o.type === 'stroke' || o.type === 'shape' || o.type === 'text' || o.type === 'tape'),
         hasSize: objs.some((o) => o.type === 'stroke' || o.type === 'shape'),
+        hasShape: objs.some((o) => o.type === 'shape'),
         single: objs.length === 1 ? objs[0] : null,
       },
     });
@@ -870,10 +878,11 @@ export class Engine {
 
   private pagesKey = '';
   private syncPagesUI() {
-    const key = this.nb.pages.map((p) => `${p.id}|${p.title}|${p.background}|${p.order.length}`).join('~') + '#' + this.pageId;
+    const key = this.nb.pages.map((p) => `${p.id}|${p.title}|${p.background}|${p.order.length}`).join('~') + '#' + this.pageId + '#' + this.nb.title;
     if (key === this.pagesKey) return;
     this.pagesKey = key;
     this.ui.set({
+      title: this.nb.title,
       pages: this.nb.pages.map((p) => ({ id: p.id, title: p.title, background: p.background, count: p.order.length })),
       pageId: this.pageId,
     });
@@ -899,6 +908,8 @@ export class Engine {
     this.updateUndoUI();
     this.invalidate();
     this.ui.set({ ready: true });
+    // graphs on the board: fetch the graph code now rather than when the page is opened
+    if (nb.pages.some((p) => p.order.some((id) => p.objects[id]?.type === 'graph'))) void loadGraph().catch(() => {});
     if (info.restoredBy !== undefined) {
       this.ui.set({ restore: null });
       this.cachePaused = false;
@@ -1098,6 +1109,7 @@ export class Engine {
     if (s.textEdit) this.commitText(s.textEdit.text);
     if (tool !== 'select' && this.sel.size) this.setSelection([]);
     this.ui.set({ tool, popover: null });
+    if (tool === 'graph') void loadGraph().catch(() => {});
     this.invalidateLive();
   }
 
@@ -1145,13 +1157,57 @@ export class Engine {
     this.setSelection(copies.map((c) => c.id));
   }
 
-  /** Copies the selection to the in-app clipboard; returns the marker to place on the system clipboard. */
+  /**
+   * Copies the selection. Returns the text to place on the system clipboard: the objects
+   * themselves, so they can be pasted into another tab or another board.
+   */
   copySelection(): string | null {
     const objs = this.selObjects();
     if (!objs.length) return null;
     const token = nanoid(8);
-    this.clipboard = { token, objs: JSON.parse(JSON.stringify(objs)), pastes: 0 };
-    return `mathboard-clip:${token}`;
+    const copy: BoardObject[] = JSON.parse(JSON.stringify(objs));
+    this.clipboard = { token, objs: copy, pastes: 0 };
+    const text = JSON.stringify({ v: 1, token, board: this.nb.id, objs: copy });
+    if (text.length <= CLIP_MAX_CHARS) return CLIP_PREFIX + text;
+    // too large for the system clipboard: it still pastes inside this tab
+    this.toast('That selection is too large to paste into another window, but it can be pasted here');
+    return CLIP_PREFIX + JSON.stringify({ v: 1, token, board: this.nb.id, objs: [] });
+  }
+
+  /**
+   * Pastes board objects from clipboard text. A copy made in this tab is used directly; anything
+   * else is validated with the server's own rules first, and images that belong to another board
+   * are copied into this one.
+   */
+  async pasteBoardText(text: string): Promise<void> {
+    let token: string | null = null;
+    try { token = (JSON.parse(text.slice(CLIP_PREFIX.length)) as { token?: string }).token ?? null; } catch { /* handled below */ }
+    if (token && this.clipboard?.token === token) { this.pasteClipboard(); return; }
+    const { parseClipboard } = await import('../../../shared/schema');
+    const payload = parseClipboard(text);
+    if (!payload) { this.toast('That copied selection could not be read here (it may be too large, or from a different version)', 'error'); return; }
+    const mine = `/uploads/${this.nb.id}/`;
+    const moved = new Map<string, string | null>();
+    const objs: BoardObject[] = [];
+    let lost = 0;
+    for (const o of payload.objs) {
+      if (o.type !== 'image' || o.src.startsWith(mine)) { objs.push(o); continue; }
+      if (!moved.has(o.src)) {
+        let url: string | null = null;
+        try {
+          const blob = await this.images.blob(o.src);
+          if (blob) url = await uploadImage(this.nb.id, blob, this.opts.passcode);
+        } catch { url = null; }
+        moved.set(o.src, url);
+      }
+      const url = moved.get(o.src);
+      if (url) objs.push({ ...o, src: url }); else lost++;
+    }
+    if (this.destroyed) return;
+    if (lost) this.toast(`${lost} image${lost === 1 ? '' : 's'} could not be copied into this board`, 'error');
+    if (!objs.length) return;
+    this.clipboard = { token: payload.token, objs, pastes: 0 };
+    this.pasteClipboard();
   }
 
   pasteClipboard() {
@@ -1220,6 +1276,69 @@ export class Engine {
     this.commit(mine.map((id) => ({ kind: 'delete', id })));
   }
 
+  // ---------- reset for the next class ----------
+  private inkIds(page: Page): string[] {
+    return page.order.filter((id) => {
+      const o = page.objects[id];
+      return !!o && (o.type === 'stroke' || o.type === 'shape') && !o.locked;
+    });
+  }
+  private coveredTapeIds(page: Page): string[] {
+    return page.order.filter((id) => { const o = page.objects[id]; return o?.type === 'tape' && o.revealed; });
+  }
+
+  /** How much a notebook-wide reset would touch (for the confirm dialogs). */
+  resetStats(): { inkPages: number; ink: number; tapePages: number; tape: number } {
+    let inkPages = 0, ink = 0, tapePages = 0, tape = 0;
+    for (const p of this.nb.pages) {
+      const i = this.inkIds(p).length, t = this.coveredTapeIds(p).length;
+      if (i) { inkPages++; ink += i; }
+      if (t) { tapePages++; tape += t; }
+    }
+    return { inkPages, ink, tapePages, tape };
+  }
+
+  /** This page: removes strokes and shapes that are not locked; images, graphs, axes, text and tape stay. Undoable. */
+  clearInk() {
+    const ids = this.inkIds(this.page);
+    if (!ids.length) { this.toast('There is no ink to clear on this page'); return; }
+    this.setSelection([]);
+    this.commit(ids.map((id) => ({ kind: 'delete', id })));
+    this.toast(`Cleared ${ids.length} stroke${ids.length === 1 ? '' : 's'} — Undo brings them back`);
+  }
+
+  /** This page: every revealed tape covers its answer again. Undoable. */
+  coverTape(_scope: 'page' = 'page') {
+    const ids = this.coveredTapeIds(this.page);
+    if (!ids.length) { this.toast('Every tape on this page is already covering'); return; }
+    this.commit(ids.map((id) => ({ kind: 'update', id, patch: { revealed: false } })));
+    this.toast(`Covered ${ids.length} tape${ids.length === 1 ? '' : 's'} again`);
+  }
+
+  /**
+   * The same for every page. The server keeps a backup of the notebook first; without that
+   * backup nothing is changed.
+   */
+  async resetNotebook(what: 'ink' | 'tape'): Promise<void> {
+    if (!(await this.sync.backup())) {
+      this.toast('Nothing was changed: the server could not keep a backup first. Check the connection and try again.', 'error');
+      return;
+    }
+    if (this.destroyed) return;
+    this.input.cancelGesture();
+    this.setSelection([]);
+    let pages = 0, n = 0;
+    for (const p of this.nb.pages) {
+      const ids = what === 'ink' ? this.inkIds(p) : this.coveredTapeIds(p);
+      if (!ids.length) continue;
+      pages++; n += ids.length;
+      this.commit(ids.map((id): OpBody => (what === 'ink' ? { kind: 'delete', id } : { kind: 'update', id, patch: { revealed: false } })), { pageId: p.id });
+    }
+    this.toast(n
+      ? `${what === 'ink' ? 'Cleared the ink' : 'Covered the tape'} on ${pages} page${pages === 1 ? '' : 's'}. A backup was kept on the server.`
+      : what === 'ink' ? 'There was no ink to clear' : 'Every tape was already covering');
+  }
+
   // ---------- text ----------
   beginText(at: { x: number; y: number } | BoardObject) {
     const cur = this.ui.get().textEdit;
@@ -1265,14 +1384,51 @@ export class Engine {
   }
 
   // ---------- images ----------
+  private viewRect(): Rect {
+    const v = this.viewBox();
+    return { x: v[0], y: v[1], w: v[2] - v[0], h: v[3] - v[1] };
+  }
+
+  /** Corners already taken by images on a page (and by images still uploading), for cascading. */
+  private imageCorners(pageId: string): { x: number; y: number }[] {
+    const out: { x: number; y: number }[] = [];
+    const page = findPage(this.nb, pageId);
+    if (page) for (const id of page.order) { const o = page.objects[id]; if (o?.type === 'image') out.push({ x: o.x, y: o.y }); }
+    for (const p of this.placeholders.values()) if (p.pageId === pageId) out.push({ x: p.obj.x, y: p.obj.y });
+    return out;
+  }
+
+  /**
+   * Inserts images that arrived together (paste, drop, file picker). `at` is the drop point in
+   * world coordinates; without it they go to the middle of the view. Several images are laid
+   * out side by side so none hides another.
+   */
+  async insertImages(files: Blob[], opts: { at?: { x: number; y: number } | null } = {}): Promise<void> {
+    const list = files.slice(0, 20);
+    if (!list.length) return;
+    if (files.length > list.length) this.toast(`Only the first ${list.length} images were added`);
+    const pageId = this.pageId;
+    const view = this.viewRect();
+    const prepared: PreparedImage[] = [];
+    let failed = 0;
+    for (const f of list) {
+      try { prepared.push(await prepareImage(f)); } catch { failed++; }
+    }
+    if (failed) this.toast(failed === list.length ? 'Could not read that image' : `${failed} file${failed === 1 ? '' : 's'} could not be read as images`, 'error');
+    if (!prepared.length || this.destroyed) return;
+    const rects = placeImages(prepared.map((p) => ({ w: p.w, h: p.h })), view, opts.at);
+    // a single image pasted twice in the same view must not land exactly on the first
+    if (rects.length === 1) rects[0] = cascade(rects[0], this.imageCorners(pageId), 24 / this.cam.zoom);
+    await Promise.all(prepared.map((prep, i) => this.insertImage(prep.blob, { rect: rects[i], pageId, prepared: prep })));
+  }
+
   /** Shows the image immediately from the local decode, uploads it, then commits the synced object. */
-  async insertImage(file: Blob, opts: { locked?: boolean; pageId?: string; rect?: { x: number; y: number; w: number; h: number }; quiet?: boolean } = {}): Promise<string | null> {
+  async insertImage(file: Blob, opts: { locked?: boolean; pageId?: string; rect?: Rect; quiet?: boolean; prepared?: PreparedImage } = {}): Promise<string | null> {
     const pageId = opts.pageId ?? this.pageId;
     const id = nanoid(12);
     try {
-      const prep = await prepareImage(file);
-      const v = this.viewBox();
-      const rect = opts.rect ?? placeImage(prep.w, prep.h, { x: v[0], y: v[1], w: v[2] - v[0], h: v[3] - v[1] });
+      const prep = opts.prepared ?? await prepareImage(file);
+      const rect = opts.rect ?? cascade(placeImage(prep.w, prep.h, this.viewRect()), this.imageCorners(pageId), 24 / this.cam.zoom);
       const obj: ImageObj = {
         id, type: 'image', authorId: this.me.userId, createdAt: Date.now(), src: `local:${id}`,
         x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.w), h: Math.round(rect.h), naturalW: prep.w, naturalH: prep.h,
@@ -1355,10 +1511,43 @@ export class Engine {
     const newId = nanoid(10);
     if (this.pageOp({ kind: 'duplicate', pageId, newId, title: `${src.title} (copy)`.slice(0, 120), seed: nanoid(8) })) this.gotoPage(newId);
   }
+  /** Deletes a page for everyone and offers Undo for ten seconds (the page comes back whole, where it was). */
   deletePage(pageId: string) {
     if (this.nb.pages.length <= 1) { this.toast('A notebook needs at least one page'); return; }
-    this.undoStacks.delete(pageId);
-    this.pageOp({ kind: 'delete', pageId });
+    const index = this.nb.pages.findIndex((p) => p.id === pageId);
+    const page = this.nb.pages[index];
+    if (!page) return;
+    const wasHere = this.pageId === pageId;
+    if (!this.pageOp({ kind: 'delete', pageId })) return;
+    this.toast(`Deleted "${page.title}"`, 'info', {
+      ms: 10000,
+      action: {
+        label: 'Undo',
+        run: () => {
+          if (findPage(this.nb, page.id)) return;
+          if (!this.pageOp({ kind: 'restorePage', page, index })) { this.toast('That page could not be restored', 'error'); return; }
+          if (wasHere) this.gotoPage(page.id);
+        },
+      },
+    });
+  }
+
+  /** Renames the notebook for everyone. */
+  setTitle(title: string) {
+    const t = title.trim().slice(0, 120);
+    if (t && t !== this.nb.title) this.pageOp({ kind: 'notebookTitle', title: t });
+  }
+  /** The name to show: the board code stands in for a notebook nobody has named yet. */
+  displayTitle(): string { return this.nb.title && this.nb.title !== DEFAULT_TITLE ? this.nb.title : `MathBoard ${this.nb.id}`; }
+
+  /** Changes my display name without leaving: chips and my cursor label update for everyone. */
+  rename(name: string) {
+    const n = name.trim().slice(0, 40);
+    if (!n || n === this.me.name) return;
+    this.opts.name = n;
+    this.ui.set((s) => ({ me: { ...s.me, name: n } }));
+    try { localStorage.setItem('mathboard.name', n); } catch { /* ignore */ }
+    this.sync.setName(n);
   }
   reorderPage(pageId: string, index: number) { this.pageOp({ kind: 'reorder', pageId, index }); }
   setBackground(background: Background) { this.pageOp({ kind: 'setBackground', pageId: this.pageId, background }); }

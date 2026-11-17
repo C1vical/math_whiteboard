@@ -158,7 +158,9 @@ await shot(B, '13-graph-B');
 
 await step('axes', async () => {
   await A.keyboard.press('Escape');
-  await A.click('.toolbar .ibtn[aria-label="Coordinate axes"]');
+  // graph, axes, tape and image now sit in the Insert flyout (toolbar fits 1280×720)
+  await A.click('.toolbar .ibtn[aria-label^="Insert:"]');
+  await A.click('.popover .menu-item:has-text("Coordinate axes")');
   await drag(A, [[80, 60], [330, 250]]);
   await A.waitForSelector('.inspector');
   await shot(A, '14-axes');
@@ -168,7 +170,8 @@ await step('axes', async () => {
 
 await step('tape + reveal by tap', async () => {
   await A.keyboard.press('Escape');
-  await A.click('.toolbar .ibtn[aria-label^="Tape"]');
+  await A.click('.toolbar .ibtn[aria-label^="Insert:"]');
+  await A.click('.popover .menu-item:has-text("Tape")');
   await drag(A, [[100, 500], [420, 590]]);
   let tp = await st(B, () => { const pg = window.mathboard.page; return pg.order.map((id) => pg.objects[id]).find((x) => x.type === 'tape'); });
   if (!tp || tp.revealed) throw new Error('tape missing');
@@ -263,9 +266,11 @@ await step('replay', async () => {
 });
 
 await step('export PNG / PDF / JSON', async () => {
-  for (const label of ['Export this page as PNG', 'Export notebook as PDF', 'Back up notebook']) {
+  for (const label of ['Export this page as PNG', 'Export as PDF', 'Back up notebook']) {
     await A.click('.topright .ibtn[aria-label="Menu"]');
-    const [dl] = await Promise.all([A.waitForEvent('download', { timeout: 20000 }), A.click(`.menu-item:has-text("${label}")`)]);
+    // PNG and PDF now open the export dialog first
+    const go = label === 'Back up notebook' ? A.click(`.menu-item:has-text("${label}")`) : A.click(`.menu-item:has-text("${label}")`).then(() => A.click('.dialog-actions .btn.primary'));
+    const [dl] = await Promise.all([A.waitForEvent('download', { timeout: 20000 }), go]);
     const f = path.join(OUT, dl.suggestedFilename().replace(/[^\w.-]+/g, '_'));
     await dl.saveAs(f);
     log('   downloaded', path.basename(f));

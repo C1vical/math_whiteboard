@@ -11,7 +11,8 @@ import { SelectionBar } from './SelectionBar';
 import { Sidebar } from './Sidebar';
 import { FocusBar, Toolbar } from './Toolbar';
 import { TopRight } from './TopRight';
-import { pickFiles } from './util';
+import { DEFAULT_TITLE } from '../../../shared/types';
+import { pickFiles, rememberBoard } from './util';
 
 interface BoardProps {
   notebookId: string;
@@ -41,7 +42,7 @@ export function Board({ notebookId, name, userId, passcode, onExit, onBadPasscod
       ev.preventDefault();
       if ((ev.target as HTMLElement | null)?.tagName === 'CANVAS') return; // the board handles its own drops
       const files = Array.from(ev.dataTransfer?.files ?? []).filter((f) => f.type.startsWith('image/'));
-      void (async () => { for (const f of files.slice(0, 10)) await engine.insertImage(f); })();
+      void engine.insertImages(files);
     };
     const beforeUnload = (ev: BeforeUnloadEvent) => {
       if (engine.sync.pending.length) { ev.preventDefault(); ev.returnValue = ''; }
@@ -75,18 +76,38 @@ export function Board({ notebookId, name, userId, passcode, onExit, onBadPasscod
         </div>
         {ctx && <Dialogs />}
         {ctx && <Toasts />}
+        {ctx && <TitleSync notebookId={notebookId} />}
         <Tooltips />
       </Ctx.Provider>
     </div>
   );
 }
 
+/** Keeps the browser tab title and the "recent boards" list in step with the board's name. */
+function TitleSync({ notebookId }: { notebookId: string }) {
+  const title = useUI((s) => s.title);
+  const ready = useUI((s) => s.ready);
+  const conn = useUI((s) => s.conn);
+  const engine = useEngine();
+  useEffect(() => {
+    const named = !!title && title !== DEFAULT_TITLE;
+    document.title = named ? `${title} — MathBoard` : `MathBoard — ${notebookId}`;
+    if (ready) rememberBoard(notebookId, named ? title : undefined);
+  }, [title, ready, notebookId]);
+  // after an outage (shown by ConnBanner), say when it is over
+  const lost = useRef(false);
+  useEffect(() => {
+    if (!ready) return;
+    if (conn !== 'connected') lost.current = true;
+    else if (lost.current) { lost.current = false; engine.toast('Connected again — everything is synced'); }
+  }, [conn, ready, engine]);
+  return null;
+}
+
 function useInsertImage() {
   const engine = useEngine();
   return useCallback(() => {
-    void pickFiles('image/png,image/jpeg,image/gif,image/webp,image/*', true).then(async (files) => {
-      for (const f of files.slice(0, 10)) await engine.insertImage(f);
-    });
+    void pickFiles('image/png,image/jpeg,image/gif,image/webp,image/*', true).then((files) => engine.insertImages(files));
   }, [engine]);
 }
 
@@ -135,7 +156,10 @@ function Overlays({ onExit, onBadPasscode }: { onExit: () => void; onBadPasscode
       {!replay && <SelectionBar />}
       {!replay && <Inspector />}
       {focus && <FocusBar />}
-      <FollowBanner />
+      <div className={`banners ${focus ? 'below-focusbar' : ''}`}>
+        <ConnBanner />
+        <FollowBanner />
+      </div>
       {replay ? <ReplayBar /> : <Pager />}
       <ZoomControls />
     </>
@@ -256,15 +280,33 @@ function ReplayBar() {
   );
 }
 
+/** Connection trouble, said in words over the board (the top bar only has room for a coloured dot). */
+function ConnBanner() {
+  const conn = useUI((s) => s.conn);
+  const ready = useUI((s) => s.ready);
+  const [show, setShow] = useState(false);
+  // a blip shorter than a second and a half is not worth a banner
+  useEffect(() => {
+    if (conn === 'connected' || !ready) { setShow(false); return; }
+    const t = window.setTimeout(() => setShow(true), 1500);
+    return () => window.clearTimeout(t);
+  }, [conn, ready]);
+  if (!show || conn === 'connected') return null;
+  return (
+    <div className={`banner conn ${conn}`} role="status">
+      {conn === 'offline' ? 'Offline' : 'Reconnecting…'} — keep writing, it will sync when the connection returns
+    </div>
+  );
+}
+
 function FollowBanner() {
   const engine = useEngine();
   const following = useUI((s) => s.following);
   const users = useUI((s) => s.users);
-  const focus = useUI((s) => s.focus);
   if (!following) return null;
   const u = users.find((x) => x.sid === following);
   return (
-    <div className="banner" style={{ background: u?.color, top: focus ? 64 : undefined }}>
+    <div className="banner" style={{ background: u?.color }}>
       Following {u?.name ?? 'collaborator'}
       <button type="button" onClick={() => engine.stopFollow()}>Stop</button>
     </div>
@@ -276,7 +318,12 @@ function Toasts() {
   if (!toasts.length) return null;
   return (
     <div className="toasts" role="status" aria-live="polite">
-      {toasts.map((t) => <div key={t.id} className={`toast ${t.kind}`}>{t.msg}</div>)}
+      {toasts.map((t) => (
+        <div key={t.id} className={`toast ${t.kind}`}>
+          <span>{t.msg}</span>
+          {t.action && <button type="button" className="toast-action" onClick={t.action.run}>{t.action.label}</button>}
+        </div>
+      ))}
     </div>
   );
 }

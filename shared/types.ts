@@ -218,4 +218,7 @@ export const USER_COLORS = [
 export const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 export const INK = 'ink';
 export const DEFAULT_TITLE = 'Untitled notebook';
+/** board objects on the system clipboard: this prefix followed by JSON (see shared/schema.ts) */
+export const CLIP_PREFIX = 'mathboard-clip:';
+export const CLIP_MAX_CHARS = 4_000_000;
 export const MAX_TIMER_MS = 24 * 60 * 60 * 1000;

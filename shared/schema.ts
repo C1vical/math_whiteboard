@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { patched } from './ops';
-import { DEFAULT_TITLE, type BoardObject, type Notebook, type Page } from './types';
+import { CLIP_MAX_CHARS, CLIP_PREFIX, DEFAULT_TITLE, type BoardObject, type Notebook, type Page } from './types';
 
 // Validation rules for everything that is stored: board objects, pages and notebooks.
 // Shared so the server (incoming messages, files on disk) and the client (pasting board
@@ -94,14 +94,23 @@ export const notebook = z.object({
 });
 
 /** Board objects on the system clipboard (copy / paste across tabs and boards). */
-export const CLIP_PREFIX = 'mathboard-clip:';
-export const CLIP_MAX_CHARS = 4_000_000;
 export const clipboardPayload = z.object({
   v: z.literal(1),
   token: z.string().max(40),
   board: id,
   objs: z.array(boardObject).min(1).max(20000),
 });
+
+export interface ClipboardPayload { v: 1; token: string; board: string; objs: BoardObject[] }
+
+/** Reads board objects from clipboard text; null when it is not ours, too large or not valid. */
+export function parseClipboard(text: string): ClipboardPayload | null {
+  if (!text.startsWith(CLIP_PREFIX) || text.length > CLIP_MAX_CHARS + CLIP_PREFIX.length) return null;
+  let raw: unknown;
+  try { raw = JSON.parse(text.slice(CLIP_PREFIX.length)); } catch { return null; }
+  const parsed = clipboardPayload.safeParse(raw);
+  return parsed.success ? (parsed.data as ClipboardPayload) : null;
+}
 
 // ---------- salvage: keep everything that is still valid ----------
 

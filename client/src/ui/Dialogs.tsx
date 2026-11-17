@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
-import { importNotebookJson } from '../engine/exporter';
+import { DEFAULT_EXPORT, exportPagePng, exportPdf, importNotebookJson, type ExportOptions } from '../engine/exporter';
 import { importPdfPages, openPdf, type OpenPdf } from '../engine/pdfImport';
 import { defaultSettings } from '../engine/store';
-import { Dialog, MOD, Segmented, Toggle, useEngine, useUI } from './common';
+import { Dialog, MOD, Section, Segmented, Toggle, useEngine, useUI } from './common';
+import { ls } from './util';
 
 const SHORTCUTS: [string[], string][] = [
   [['P'], 'Pen (last used favorite)'],
@@ -11,10 +12,14 @@ const SHORTCUTS: [string[], string][] = [
   [['E'], 'Eraser (press again: stroke ↔ partial)'],
   [['V', 'S'], 'Lasso select'],
   [['R'], 'Ruler on / off'],
+  [['Shift', 'P'], 'Protractor on / off'],
   [['Shift', 'R'], 'Shapes'],
-  [['L'], 'Laser pointer'],
+  [['L'], 'Laser pointer (hold L: laser only while held)'],
   [['T'], 'Text'],
   [['G'], 'Graph'],
+  [['A'], 'Axes (press again: x–y axes ↔ number line)'],
+  [['K'], 'Tape'],
+  [['I'], 'Insert / remove space'],
   [['[', ']'], 'Thinner / thicker'],
   [['F'], 'Focus mode'],
   [['Delete'], 'Delete selection'],
@@ -59,6 +64,7 @@ export function Dialogs() {
             </tbody>
           </table>
           <p className="hint">Pen hardware: the eraser end erases, and holding the barrel button while dragging lassos. Click a tool that is already selected to open its settings.</p>
+          <p className="hint">Touch: tap with two fingers to undo, with three fingers to redo.</p>
         </Dialog>
       );
     case 'settings':
@@ -87,6 +93,24 @@ export function Dialogs() {
           <p>Only the strokes and shapes you drew are removed. Other people's writing, images and graphs stay. You can bring it back with Undo ({MOD}+Z).</p>
         </Dialog>
       );
+    case 'resetInk':
+      return (
+        <Dialog
+          title="Clear the ink on this page?" onClose={close} width={420}
+          actions={<>
+            <button type="button" className="btn" onClick={close}>Cancel</button>
+            <button type="button" className="btn danger solid" onClick={() => { engine.clearInk(); close(); }}>Clear ink</button>
+          </>}
+        >
+          <p>Strokes and shapes that are not locked are removed for everyone. Images, graphs, axes, text and tape stay, so the page is ready for the next class.</p>
+          <p>You can bring the ink back with Undo ({MOD}+Z).</p>
+        </Dialog>
+      );
+    case 'resetInkAll':
+    case 'coverAll':
+      return <ResetNotebookDialog what={dialog === 'resetInkAll' ? 'ink' : 'tape'} onClose={close} />;
+    case 'export':
+      return <ExportDialog onClose={close} />;
     case 'pdf':
       return <PdfDialog onClose={close} />;
     case 'importJson':
@@ -96,21 +120,155 @@ export function Dialogs() {
   }
 }
 
+/** Notebook-wide reset. States how many pages are affected; the server keeps a backup first. */
+function ResetNotebookDialog({ what, onClose }: { what: 'ink' | 'tape'; onClose: () => void }) {
+  const engine = useEngine();
+  const [busy, setBusy] = useState(false);
+  const [stats] = useState(() => engine.resetStats());
+  const pages = what === 'ink' ? stats.inkPages : stats.tapePages;
+  const count = what === 'ink' ? stats.ink : stats.tape;
+  const total = engine.nb.pages.length;
+  const run = () => {
+    setBusy(true);
+    void engine.resetNotebook(what).finally(onClose);
+  };
+  return (
+    <Dialog
+      title={what === 'ink' ? 'Clear the ink in the whole notebook?' : 'Cover all tape in the notebook?'} onClose={busy ? undefined : onClose} width={440}
+      actions={<>
+        <button type="button" className="btn" disabled={busy} onClick={onClose}>Cancel</button>
+        <button type="button" className={`btn ${what === 'ink' ? 'danger solid' : 'primary'}`} disabled={busy || !pages} onClick={run}>
+          {busy ? 'Working…' : what === 'ink' ? `Clear ink on ${pages} page${pages === 1 ? '' : 's'}` : `Cover tape on ${pages} page${pages === 1 ? '' : 's'}`}
+        </button>
+      </>}
+    >
+      {pages === 0 ? (
+        <p>{what === 'ink' ? 'There is no ink to clear in this notebook.' : 'Every tape in this notebook is already covering its answer.'}</p>
+      ) : what === 'ink' ? (
+        <>
+          <p><strong>{pages} of {total} page{total === 1 ? '' : 's'}</strong> will be affected: {count} stroke{count === 1 ? '' : 's'} and shape{count === 1 ? '' : 's'} that are not locked are removed for everyone.</p>
+          <p>Images, graphs, axes, text and tape stay. The server keeps a backup copy of the notebook first, and each page can still be undone with {MOD}+Z while you are on it.</p>
+        </>
+      ) : (
+        <>
+          <p><strong>{pages} of {total} page{total === 1 ? '' : 's'}</strong> will be affected: {count} revealed tape{count === 1 ? '' : 's'} will cover {count === 1 ? 'its answer' : 'their answers'} again for everyone.</p>
+          <p>The server keeps a backup copy of the notebook first.</p>
+        </>
+      )}
+    </Dialog>
+  );
+}
+
+const EXPORT_KEY = 'mathboard.export';
+function loadExportOptions(): ExportOptions {
+  try {
+    const s = JSON.parse(ls.get(EXPORT_KEY) ?? '{}') as Partial<ExportOptions>;
+    return {
+      scope: s.scope === 'page' ? 'page' : 'notebook',
+      paper: s.paper === 'letter' || s.paper === 'a4' ? s.paper : 'fit',
+      tape: s.tape === 'reveal' ? 'reveal' : 'cover',
+      background: s.background === 'page' ? 'page' : 'white',
+    };
+  } catch {
+    return DEFAULT_EXPORT;
+  }
+}
+
+function ExportDialog({ onClose }: { onClose: () => void }) {
+  const engine = useEngine();
+  const kind = useUI((s) => s.exportKind);
+  const pageCount = useUI((s) => s.pages.length);
+  const [opts, setOpts] = useState(loadExportOptions);
+  const [busy, setBusy] = useState(false);
+  const set = (patch: Partial<ExportOptions>) => setOpts((o) => ({ ...o, ...patch }));
+  const run = async () => {
+    setBusy(true);
+    ls.set(EXPORT_KEY, JSON.stringify(opts));
+    try {
+      if (kind === 'png') await exportPagePng(engine, opts);
+      else {
+        const r = await exportPdf(engine, opts);
+        if (r.sheets > r.pages) engine.toast(`PDF ready: ${r.pages} page${r.pages === 1 ? '' : 's'} on ${r.sheets} sheets`);
+      }
+      onClose();
+    } catch (err) {
+      engine.toast(`Export failed: ${(err as Error).message}`, 'error');
+      setBusy(false);
+    }
+  };
+  return (
+    <Dialog
+      title={kind === 'png' ? 'Export this page as PNG' : 'Export as PDF'} onClose={busy ? undefined : onClose} width={460}
+      actions={<>
+        <button type="button" className="btn" disabled={busy} onClick={onClose}>Cancel</button>
+        <button type="button" className="btn primary" disabled={busy} onClick={() => void run()}>{busy ? 'Exporting…' : 'Export'}</button>
+      </>}
+    >
+      <div className="export-form">
+        {kind === 'pdf' && (
+          <>
+            <Section title="Pages">
+              <Segmented
+                value={opts.scope} onChange={(scope) => set({ scope })}
+                options={[{ value: 'page', label: 'This page' }, { value: 'notebook', label: `Whole notebook (${pageCount})` }]}
+              />
+            </Section>
+            <Section title="Paper">
+              <Segmented
+                value={opts.paper} onChange={(paper) => set({ paper })}
+                options={[{ value: 'fit', label: 'Fit to content' }, { value: 'letter', label: 'Letter' }, { value: 'a4', label: 'A4' }]}
+              />
+              <p className="hint">
+                {opts.paper === 'fit'
+                  ? 'Each board page becomes one PDF page, sized to what is on it.'
+                  : 'Content is fitted inside the margins. A page much taller than one sheet continues on more sheets instead of being shrunk.'}
+              </p>
+            </Section>
+          </>
+        )}
+        <Section title="Tape">
+          <Segmented
+            value={opts.tape} onChange={(tape) => set({ tape })}
+            options={[{ value: 'cover', label: 'Keep answers covered' }, { value: 'reveal', label: 'Reveal everything' }]}
+          />
+          <p className="hint">{opts.tape === 'cover' ? 'Every tape hides what is under it.' : 'An answer-key copy: the tape is left out.'}</p>
+        </Section>
+        <Section title="Background">
+          <Segmented
+            value={opts.background} onChange={(background) => set({ background })}
+            options={[{ value: 'white', label: 'Plain white' }, { value: 'page', label: 'Grid, lines or dots' }]}
+          />
+        </Section>
+        {kind === 'pdf' && <p className="hint">Ink is exported as vector outlines, so it stays sharp when the PDF is zoomed in.</p>}
+      </div>
+    </Dialog>
+  );
+}
+
 function SettingsDialog({ onClose }: { onClose: () => void }) {
   const engine = useEngine();
   const st = useUI((s) => s.settings);
   const me = useUI((s) => s.me);
+  const [name, setName] = useState(me.name);
+  const saveName = () => {
+    if (name.trim()) engine.rename(name); else setName(me.name);
+  };
   return (
-    <Dialog title="Settings" onClose={onClose} width={440} actions={<button type="button" className="btn primary" onClick={onClose}>Done</button>}>
+    <Dialog title="Settings" onClose={() => { saveName(); onClose(); }} width={440} actions={<button type="button" className="btn primary" onClick={() => { saveName(); onClose(); }}>Done</button>}>
+      <label className="name-row">
+        <span className="toggle-text">Your name<small>Shown on your chip and next to your cursor. Everyone sees a change straight away.</small></span>
+        <input
+          className="field" value={name} maxLength={40} aria-label="Your name" autoComplete="name"
+          onChange={(e) => setName(e.target.value)} onBlur={saveName}
+          onKeyDown={(e) => { e.stopPropagation(); if (e.key === 'Enter') e.currentTarget.blur(); }}
+        />
+      </label>
       <Toggle label="Draw with finger" hint="For touch-only devices. Off: one finger pans, two fingers zoom, only the pen draws." checked={st.drawWithFinger} onChange={(drawWithFinger) => engine.setSettings({ drawWithFinger })} />
       <Toggle label="Lock pasted images" hint="Pasted and dropped images cannot be moved by accident. Unlock them with Select." checked={st.autoLockImages} onChange={(autoLockImages) => engine.setSettings({ autoLockImages })} />
       <Toggle label="Ink to shape" hint="A hand-drawn line, arrow, triangle, rectangle or circle becomes a clean shape." checked={st.inkToShape} onChange={(inkToShape) => engine.setSettings({ inkToShape })} />
       <Toggle label="Scribble to erase" hint="A fast back-and-forth scribble over ink erases it instead of drawing." checked={st.scribbleErase} onChange={(scribbleErase) => engine.setSettings({ scribbleErase })} />
       <Toggle label="Snap shapes and axes to the grid" hint="When the page has a grid, graph or dot background." checked={st.shape.snap} onChange={(snap) => engine.setSettings((s) => ({ shape: { ...s.shape, snap } }))} />
-      <Toggle label="Dark mode" hint="Only for you. Black ink shows as white on a dark board." checked={st.dark} onChange={(dark) => engine.setSettings({ dark })} />
-      <div className="row" style={{ justifyContent: 'space-between' }}>
-        <span className="hint">Signed in as <strong>{me.name}</strong>. Change your name from the start screen (Menu → Leave board).</span>
-      </div>
+      <Toggle label="Dark mode" hint="Only for you. Black ink shows as white on a dark board. Starts from your system setting." checked={st.dark} onChange={(dark) => engine.setSettings({ dark })} />
       <div className="row">
         <button
           type="button" className="btn small"

@@ -1,6 +1,28 @@
-import { all, create, type EvalFunction, type MathNode } from 'mathjs';
+import { create, parseDependencies, type MathNode } from 'mathjs';
 
-const math = create(all, { predictable: true });
+// Only mathjs's parser is used (a small part of the library). Expressions are evaluated by the
+// tree walker below, which knows nothing but numbers, + − × ÷ ^ and the whitelisted functions,
+// so nothing a collaborator types can reach any other mathjs function.
+const math = create({ parseDependencies }, { number: 'number', predictable: true });
+
+/** A compiled expression: evaluates with the given scope (numbers and the allowed functions). */
+interface EvalFunction { evaluate(scope: Record<string, unknown>): number }
+type Scope = Record<string, unknown>;
+type Eval = (s: Scope) => number;
+
+const OPS: Record<string, (a: number, b: number) => number> = {
+  add: (a, b) => a + b,
+  subtract: (a, b) => a - b,
+  multiply: (a, b) => a * b,
+  divide: (a, b) => a / b,
+  pow: (a, b) => Math.pow(a, b),
+  mod: (a, b) => (b === 0 ? NaN : a - b * Math.floor(a / b)),
+};
+
+/** Node fields read by the compiler (the parts of mathjs's node classes it relies on). */
+interface AnyNode {
+  type: string; value?: unknown; name?: string; content?: AnyNode; fn?: AnyNode | string; args?: AnyNode[]; op?: string;
+}
 
 export type Relation = '=' | '<' | '<=' | '>' | '>=';
 
@@ -69,33 +91,61 @@ interface Parsed {
 }
 
 function parseExpr(src: string, userFuncs: Set<string>): Parsed {
-  let node: MathNode = math.parse(src);
-  // x(x+1), a(x-2) … are implicit multiplication, not function calls
-  node = node.transform((n: MathNode) => {
-    const fnNode = n as unknown as { isFunctionNode?: boolean; fn?: { isSymbolNode?: boolean; name?: string }; args?: MathNode[] };
-    if (fnNode.isFunctionNode && fnNode.fn?.isSymbolNode && fnNode.args?.length === 1) {
-      const name = fnNode.fn.name!;
-      if (!(name in BUILTIN_FUNCS) && !userFuncs.has(name)) {
-        return new math.OperatorNode('*', 'multiply', [new math.SymbolNode(name), fnNode.args[0]], true);
-      }
-    }
-    return n;
-  });
+  const root = math.parse(src) as unknown as MathNode & AnyNode;
   const symbols = new Set<string>();
   const calls = new Set<string>();
-  node.traverse((n: MathNode, _path: string, parent: MathNode) => {
+  let nodes = 0;
+  const symbol = (name: string): Eval => {
+    if (name in CONSTANTS) { const v = CONSTANTS[name]; return () => v; }
+    symbols.add(name);
+    return (s) => { const v = s[name]; return typeof v === 'number' ? v : NaN; };
+  };
+  const compile = (n: AnyNode): Eval => {
+    if (++nodes > 2000) throw new Error('Expression is too long');
     if (!ALLOWED_NODES.has(n.type)) throw new Error('Unsupported syntax');
-    if (n.type === 'SymbolNode') {
-      const name = (n as unknown as { name: string }).name;
-      const p = parent as unknown as { isFunctionNode?: boolean; fn?: unknown } | null;
-      if (p && p.isFunctionNode && p.fn === n) {
-        if (!(name in BUILTIN_FUNCS) && !userFuncs.has(name)) throw new Error(`Unknown function "${name}"`);
+    switch (n.type) {
+      case 'ConstantNode': {
+        if (typeof n.value !== 'number') throw new Error('Unsupported value');
+        const v = n.value;
+        return () => v;
+      }
+      case 'SymbolNode': return symbol(n.name!);
+      case 'ParenthesisNode': return compile(n.content!);
+      case 'OperatorNode': {
+        const args = (n.args ?? []).map(compile);
+        const fn = n.fn as string;
+        if (args.length === 1 && fn === 'unaryMinus') { const [a] = args; return (s) => -a(s); }
+        if (args.length === 1 && fn === 'unaryPlus') return args[0];
+        const op = OPS[fn];
+        if (!op || args.length !== 2) throw new Error(`"${n.op ?? fn}" is not supported`);
+        const [a, b] = args;
+        return (s) => op(a(s), b(s));
+      }
+      case 'FunctionNode': {
+        const f = n.fn as AnyNode;
+        if (f?.type !== 'SymbolNode') throw new Error('Unsupported syntax');
+        const name = f.name!;
+        const argNodes = n.args ?? [];
+        if (!(name in BUILTIN_FUNCS) && !userFuncs.has(name)) {
+          // x(x+1), a(x-2) … are implicit multiplication, not function calls
+          if (argNodes.length !== 1) throw new Error(`Unknown function "${name}"`);
+          const a = symbol(name), b = compile(argNodes[0]);
+          return (s) => a(s) * b(s);
+        }
         calls.add(name);
-      } else if (!(name in CONSTANTS)) symbols.add(name);
+        const args = argNodes.map(compile);
+        return (s) => {
+          const fn = s[name];
+          if (typeof fn !== 'function') return NaN;
+          const v = (fn as (...a: number[]) => unknown)(...args.map((a) => a(s)));
+          return typeof v === 'number' ? v : NaN;
+        };
+      }
     }
-    if (n.type === 'ConstantNode' && typeof (n as unknown as { value: unknown }).value !== 'number') throw new Error('Unsupported value');
-  });
-  return { code: node.compile(), symbols: [...symbols], calls: [...calls] };
+    throw new Error('Unsupported syntax');
+  };
+  const run = compile(root);
+  return { code: { evaluate: (s) => run(s) }, symbols: [...symbols], calls: [...calls] };
 }
 
 function splitRelation(s: string): { lhs: string; rel: Relation; rhs: string } | null {
@@ -309,21 +359,7 @@ export function sampleFunction(f: (x: number) => number, xMin: number, xMax: num
   return paths;
 }
 
-/** A "nice" step (1, 2 or 5 × 10^k) giving roughly `target` divisions over `range`. */
-export function niceStep(range: number, target: number): number {
-  if (!(range > 0) || !(target > 0)) return 1;
-  const raw = range / target;
-  const pow = Math.pow(10, Math.floor(Math.log10(raw)));
-  const m = raw / pow;
-  return (m <= 1 ? 1 : m <= 2 ? 2 : m <= 5 ? 5 : 10) * pow;
-}
-
-export function formatTick(v: number, step: number): string {
-  if (Math.abs(v) < step / 1e6) return '0';
-  const decimals = Math.max(0, Math.min(8, -Math.floor(Math.log10(step) + 1e-9)));
-  const s = v.toFixed(decimals);
-  return s.includes('.') ? s.replace(/\.?0+$/, '') : s;
-}
+export { formatTick, niceStep } from './ticks';
 
 /** y-window that fits the visible curves over [xMin, xMax]; null when nothing to fit. */
 export function fitYRange(compiled: CompiledGraph, visible: Set<string>, xMin: number, xMax: number): [number, number] | null {

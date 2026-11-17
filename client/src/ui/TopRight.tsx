@@ -1,15 +1,66 @@
-import { useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
-  Check, CirclePlay, FileDown, FileJson, FileUp, ImageDown, ImagePlus, Keyboard, LogOut, Maximize2, Menu, Moon, RotateCcw, Settings, Share2, Sun,
+  Check, CirclePlay, CloudOff, Eraser, FileDown, FileJson, FileUp, ImageDown, ImagePlus, Keyboard, LoaderCircle, LogOut, Maximize2, Menu, Moon, RotateCcw, Settings,
+  Share2, StickyNote, Sun,
 } from 'lucide-react';
-import type { Background } from '../../../shared/types';
-import { exportNotebookJson, exportNotebookPdf, exportPagePng } from '../engine/exporter';
+import { DEFAULT_TITLE, type Background } from '../../../shared/types';
+import { exportNotebookJson } from '../engine/exporter';
+import type { ExportKind } from '../engine/store';
 import { IconBtn, Popover, Section, useEngine, useUI } from './common';
 import { copyText, initials, pickFiles } from './util';
 
 const BACKGROUNDS: { id: Background; label: string }[] = [
   { id: 'blank', label: 'Blank' }, { id: 'grid', label: 'Grid' }, { id: 'graph', label: 'Graph' }, { id: 'lined', label: 'Lined' }, { id: 'dots', label: 'Dots' },
 ];
+
+/** The notebook's name: click to rename it for everyone. */
+function BoardTitle() {
+  const engine = useEngine();
+  const title = useUI((s) => s.title);
+  const ready = useUI((s) => s.ready);
+  const [open, setOpen] = useState(false);
+  const [text, setText] = useState('');
+  const btn = useRef<HTMLButtonElement | null>(null);
+  const input = useRef<HTMLInputElement | null>(null);
+  const named = !!title && title !== DEFAULT_TITLE;
+  useEffect(() => {
+    if (!open) return;
+    input.current?.focus();
+    input.current?.select();
+  }, [open]);
+  const commit = () => {
+    engine.setTitle(text);
+    setOpen(false);
+  };
+  return (
+    <>
+      <button
+        type="button" ref={btn} className={`board-title ${named ? '' : 'unnamed'}`} disabled={!ready} aria-label="Board name"
+        data-tip={named ? `${title} — click to rename` : 'Name this board'}
+        onClick={() => { setText(named ? title : ''); setOpen(!open); }}
+      >
+        <span>{named ? title : 'Untitled'}</span>
+      </button>
+      {open && (
+        <Popover anchor={btn.current} onClose={commit} width={280} align="right">
+          <Section title="Board name">
+            <input
+              ref={input} className="field" value={text} maxLength={120} placeholder="e.g. Algebra 2 — Period 3" aria-label="Board name"
+              onChange={(e) => setText(e.target.value)}
+              onKeyDown={(e) => {
+                e.stopPropagation();
+                if (e.key === 'Enter') commit();
+                else if (e.key === 'Escape') setOpen(false);
+              }}
+            />
+          </Section>
+          <p className="hint">Everyone on the board sees the name. It is also used for the browser tab, the recent boards list and export file names.</p>
+          <p className="hint">Board code: <code>{engine.opts.notebookId}</code></p>
+        </Popover>
+      )}
+    </>
+  );
+}
 
 function Presence() {
   const engine = useEngine();
@@ -48,7 +99,7 @@ function Presence() {
           </button>
         );
       })}
-      {sorted.length > 8 && <span className="user-chip me">+{sorted.length - 8}</span>}
+      {sorted.length > 8 && <span className="user-chip me more">+{sorted.length - 8}</span>}
     </div>
   );
 }
@@ -60,11 +111,15 @@ function Status() {
   const tip = conn === 'connected' ? 'Connected — changes sync live'
     : conn === 'reconnecting' ? 'Connection lost — reconnecting. You can keep writing; it will sync.'
       : 'Offline — you can keep writing; it will sync when the connection returns.';
+  const saveTip = !saving ? 'Everything is saved'
+    : conn === 'connected' ? 'Saving…' : 'Your changes are kept on this device and will be sent when the connection returns';
   return (
     <span className="status">
-      <span className={`pill ${conn}`} data-tip={tip} role="status"><span className="dot" /><span className="label">{label}</span></span>
-      <span className={`save-ind ${saving ? 'saving' : ''}`} role="status" data-tip={saving && conn !== 'connected' ? 'Your changes are kept on this device and will be sent when the connection returns' : undefined}>
-        {saving ? (conn === 'connected' ? 'Saving…' : 'Not saved yet') : <><Check size={14} /> Saved</>}
+      <span className={`pill ${conn}`} data-tip={tip} role="status" aria-label={label}><span className="dot" /><span className="label">{label}</span></span>
+      <span className={`save-ind ${saving ? 'saving' : ''} ${conn}`} role="status" data-tip={saveTip} aria-label={saveTip}>
+        {saving
+          ? (conn === 'connected' ? <><LoaderCircle size={14} className="spin" /><span className="label">Saving…</span></> : <><CloudOff size={14} /><span className="label">Not saved yet</span></>)
+          : <><Check size={14} /><span className="label">Saved</span></>}
       </span>
     </span>
   );
@@ -97,12 +152,14 @@ export function TopRight({ onExit, onInsertImage }: { onExit: () => void; onInse
     const [file] = await pickFiles('application/json,.json');
     if (file) engine.ui.set({ pendingFile: file, dialog: 'importJson' });
   };
+  const openExport = (exportKind: ExportKind) => engine.ui.set({ dialog: 'export', exportKind });
 
   return (
     <div className="topright">
+      <BoardTitle />
       <Presence />
       <Status />
-      <button type="button" className="btn small primary share-btn" data-tip="Copy the link to this board" onClick={() => void share()}>
+      <button type="button" className="btn small primary share-btn" data-tip="Copy the link to this board" aria-label="Share" onClick={() => void share()}>
         <Share2 size={15} /><span>Share</span>
       </button>
       <IconBtn tip="Menu" active={popover === 'menu'} btnRef={(el) => { menuBtn.current = el; }} onClick={() => engine.ui.set({ popover: popover === 'menu' ? null : 'menu' })}>
@@ -134,12 +191,12 @@ export function TopRight({ onExit, onInsertImage }: { onExit: () => void; onInse
             <button type="button" className="menu-item" onClick={run(onInsertImage)}><ImagePlus size={17} />Insert image…</button>
             <button type="button" className="menu-item" onClick={run(choosePdf)}><FileUp size={17} />Import PDF…</button>
             <div className="menu-sep" />
-            <button type="button" className="menu-item" onClick={run(() => exportPagePng(engine))}><ImageDown size={17} />Export this page as PNG</button>
-            <button type="button" className="menu-item" onClick={run(async () => { engine.toast('Building the PDF…'); await exportNotebookPdf(engine); })}>
-              <FileDown size={17} />Export notebook as PDF
-            </button>
+            <button type="button" className="menu-item" onClick={run(() => openExport('png'))}><ImageDown size={17} />Export this page as PNG…</button>
+            <button type="button" className="menu-item" onClick={run(() => openExport('pdf'))}><FileDown size={17} />Export as PDF…</button>
             <button type="button" className="menu-item" onClick={run(() => exportNotebookJson(engine))}><FileJson size={17} />Back up notebook (.json)</button>
             <button type="button" className="menu-item" onClick={run(chooseBackup)}><RotateCcw size={17} />Restore from a backup…</button>
+            <div className="menu-sep" />
+            <ResetMenu run={run} />
             <div className="menu-sep" />
             <button type="button" className="menu-item" onClick={run(() => engine.ui.set({ dialog: 'settings' }))}><Settings size={17} />Settings</button>
             <button type="button" className="menu-item" onClick={run(() => engine.ui.set({ dialog: 'shortcuts' }))}>
@@ -150,5 +207,19 @@ export function TopRight({ onExit, onInsertImage }: { onExit: () => void; onInse
         </Popover>
       )}
     </div>
+  );
+}
+
+/** "Reset for the next class": clear the ink but keep the prepared material, and cover the answers again. */
+export function ResetMenu({ run }: { run: (fn: () => void | Promise<void>) => () => void }) {
+  const engine = useEngine();
+  return (
+    <>
+      <div className="menu-title">Reset for the next class</div>
+      <button type="button" className="menu-item" onClick={run(() => engine.ui.set({ dialog: 'resetInk' }))}><Eraser size={17} />Clear ink, keep everything else…</button>
+      <button type="button" className="menu-item" onClick={run(() => engine.coverTape('page'))}><StickyNote size={17} />Cover all tape again</button>
+      <button type="button" className="menu-item" onClick={run(() => engine.ui.set({ dialog: 'resetInkAll' }))}><Eraser size={17} />Clear ink in the whole notebook…</button>
+      <button type="button" className="menu-item" onClick={run(() => engine.ui.set({ dialog: 'coverAll' }))}><StickyNote size={17} />Cover all tape in the notebook…</button>
+    </>
   );
 }

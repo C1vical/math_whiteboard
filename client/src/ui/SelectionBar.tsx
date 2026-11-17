@@ -1,8 +1,8 @@
 import { useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { AArrowDown, AArrowUp, BringToFront, ClipboardCopy, Copy, Hand, Lock, LockOpen, Pencil, Scissors, SendToBack, SlidersHorizontal, Trash2 } from 'lucide-react';
-import type { BoardObject } from '../../../shared/types';
+import type { BoardObject, Shape } from '../../../shared/types';
 import { HL_COLORS, PEN_COLORS, TAPE_COLORS } from '../engine/store';
-import { cssColor, IconBtn, MOD, Popover, Section, Slider, Swatches, useEngine, useUI } from './common';
+import { cssColor, IconBtn, MOD, Popover, Section, Slider, Swatches, Toggle, useEngine, useUI } from './common';
 import { clamp, copyText, UndoGroup } from './util';
 
 const colorOf = (o: BoardObject): string | null => (o.type === 'stroke' || o.type === 'shape' || o.type === 'text' || o.type === 'tape' ? o.color : null);
@@ -53,6 +53,18 @@ export function SelectionBar() {
   const color = objs.map(colorOf).find((c) => c !== null) ?? null;
   const size = objs.map(sizeOf).find((s) => s !== null) ?? null;
   const onlyTape = objs.every((o) => o.type === 'tape');
+  // shape styling, like the shape tool's own popover
+  const shapes = objs.filter((o): o is Shape => o.type === 'shape');
+  const fillable = shapes.filter((s) => s.kind === 'rect' || s.kind === 'ellipse' || s.kind === 'triangle' || s.kind === 'polygon');
+  const dashed = shapes.length > 0 && shapes.every((s) => s.dashed);
+  const fill = fillable.find((s) => s.fill)?.fill ?? null;
+  const fillOpacity = fillable.find((s) => s.fill)?.fillOpacity ?? 0.25;
+  const patchFill = (patch: Record<string, unknown>, grouped = false) => {
+    const ops = fillable.map((s) => ({ kind: 'update' as const, id: s.id, patch }));
+    if (!ops.length) return;
+    if (grouped) group.apply(ops);
+    else { group.end(); engine.commit(ops); }
+  };
   const closePop = () => { setPop(null); group.end(); };
 
   const copy = () => {
@@ -80,7 +92,7 @@ export function SelectionBar() {
         </IconBtn>
       )}
       {!locked && sel.hasSize && size !== null && (
-        <IconBtn tip="Thickness" active={pop === 'size'} btnRef={(el) => { sizeBtn.current = el; }} onClick={() => setPop(pop === 'size' ? null : 'size')}>
+        <IconBtn tip={sel.hasShape ? 'Thickness, dashes and fill' : 'Thickness'} active={pop === 'size'} btnRef={(el) => { sizeBtn.current = el; }} onClick={() => setPop(pop === 'size' ? null : 'size')}>
           <SlidersHorizontal size={17} />
         </IconBtn>
       )}
@@ -130,7 +142,7 @@ export function SelectionBar() {
         </Popover>
       )}
       {pop === 'size' && size !== null && (
-        <Popover anchor={sizeBtn.current} onClose={closePop} width={250}>
+        <Popover anchor={sizeBtn.current} onClose={closePop} width={262}>
           <Section title="Thickness">
             <div onPointerUp={() => group.end()} onKeyUp={() => group.end()}>
               <Slider
@@ -144,6 +156,28 @@ export function SelectionBar() {
               />
             </div>
           </Section>
+          {shapes.length > 0 && (
+            <Toggle
+              label="Dashed line" checked={dashed}
+              onChange={(on) => { group.end(); engine.commit(shapes.map((s) => ({ kind: 'update' as const, id: s.id, patch: { dashed: on ? true : null } }))); }}
+            />
+          )}
+          {fillable.length > 0 && (
+            <Section title="Fill">
+              <div className="swatches">
+                <button type="button" className={`swatch none ${fill === null ? 'on' : ''}`} title="No fill" style={{ width: 26, height: 26 }} onClick={() => patchFill({ fill: null, fillOpacity: null })} />
+              </div>
+              <Swatches colors={PEN_COLORS} value={fill} onPick={(c) => patchFill({ fill: c, fillOpacity })} dark={dark} />
+              {fill && (
+                <div onPointerUp={() => group.end()} onKeyUp={() => group.end()}>
+                  <Slider
+                    value={Math.round(fillOpacity * 100)} min={5} max={100} step={5} label={`${Math.round(fillOpacity * 100)}%`}
+                    onChange={(v) => patchFill({ fillOpacity: v / 100 }, true)}
+                  />
+                </div>
+              )}
+            </Section>
+          )}
         </Popover>
       )}
     </div>

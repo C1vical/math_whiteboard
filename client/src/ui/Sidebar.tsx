@@ -109,7 +109,16 @@ export function Sidebar() {
             <button type="button" className="menu-item" disabled={menuIndex <= 0} onClick={() => engine.reorderPage(menuPage.id, menuIndex - 1)}><ArrowUp size={16} />Move up</button>
             <button type="button" className="menu-item" disabled={menuIndex >= pages.length - 1} onClick={() => engine.reorderPage(menuPage.id, menuIndex + 1)}><ArrowDown size={16} />Move down</button>
             <div className="menu-sep" />
-            <button type="button" className="menu-item danger" disabled={pages.length <= 1} onClick={() => { setMenu(null); setConfirm(menuPage); }}><Trash2 size={16} />Delete…</button>
+            <button
+              type="button" className="menu-item danger" disabled={pages.length <= 1}
+              onClick={() => {
+                setMenu(null);
+                // an empty page goes at once; either way a toast offers Undo for ten seconds
+                if (menuPage.count > 0) setConfirm(menuPage); else engine.deletePage(menuPage.id);
+              }}
+            >
+              <Trash2 size={16} />{menuPage.count > 0 ? 'Delete…' : 'Delete'}
+            </button>
           </div>
         </Popover>
       )}
@@ -122,9 +131,8 @@ export function Sidebar() {
           </>}
         >
           <p>
-            {confirm.count > 0
-              ? `This page has ${confirm.count} item${confirm.count === 1 ? '' : 's'} on it. Deleting it removes them for everyone and cannot be undone.`
-              : 'This page is empty. Deleting it removes it for everyone.'}
+            This page has {confirm.count} item{confirm.count === 1 ? '' : 's'} on it. Deleting it removes the page for everyone.
+            You can bring it back with <strong>Undo</strong> in the message that appears, for about ten seconds.
           </p>
         </Dialog>
       )}

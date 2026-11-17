@@ -8,7 +8,7 @@ import { round1, round2, straightPoints } from '../../../shared/ink';
 import { isScribble, recognizeShape, type Recognized } from '../../../shared/recognize';
 import { findSnap, knobPos, rulerContains, snapAngle, snapPoint, type Snap } from '../../../shared/ruler';
 import { spaceTargets } from '../../../shared/space';
-import type { Axes, BBox, BoardObject, Graph, Shape, Stroke, StrokeStyle, Tape } from '../../../shared/types';
+import { CLIP_PREFIX, type Axes, type BBox, type BoardObject, type Graph, type Shape, type Stroke, type StrokeStyle, type Tape } from '../../../shared/types';
 import type { Engine, OpBody } from './Engine';
 import { drawLiveStroke, drawShape, gridUnit, resolveColor } from './render';
 import { ERASER_SIZES, type ShapeTool } from './store';
@@ -30,6 +30,11 @@ export const nextGraphColor = (n: number) => GRAPH_COLORS[n % GRAPH_COLORS.lengt
 const isEditable = (t: EventTarget | null) => {
   const el = t as HTMLElement | null;
   return !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable);
+};
+/** Sliders, checkboxes and colour pickers: they take arrow keys, but not undo / redo or Esc. */
+const isControl = (t: EventTarget | null) => {
+  const el = t as HTMLInputElement | null;
+  return !!el && el.tagName === 'INPUT' && ['range', 'checkbox', 'radio', 'color', 'button'].includes(el.type);
 };
 
 function snapTo15(ax: number, ay: number, bx: number, by: number): [number, number] {
@@ -798,6 +803,7 @@ export class Input {
   private touches = new Map<number, { sx: number; sy: number }>();
   private pinch: { d0: number; a0: number; zoom0: number; wx: number; wy: number; ruler: { angle: number; x: number; y: number; cx: number; cy: number } | null } | null = null;
   private spaceDown = false;
+  private laserKey: { t: number } | null = null;
   private cursorDirty = false;
   private cursorSentAt = 0;
   private rulerRaw: number | null = null;
@@ -900,7 +906,7 @@ export class Input {
     this.gesture = g;
     this.gestureTouch = touch;
     this.pointerId = ev.pointerId;
-    const tool = this.e.ui.get().tool;
+    const tool = this.activeTool();
     // a tap on a tape reveals / hides it instead of doing the tool's normal thing
     let tape: Tape | null = null;
     if (g.kind !== 'ruler' && g.kind !== 'eraser') {
@@ -934,7 +940,7 @@ export class Input {
     if (pen && ((ev.buttons & 32) || ev.button === 5)) return new EraserGesture(e, p);
     if (pen && ((ev.buttons & 2) || ev.button === 2)) return new SelectGesture(e, this, p, ev);
 
-    const tool = ui.tool;
+    const tool = this.activeTool();
     const penLike = tool === 'pen' || tool === 'highlighter';
     const r = ui.ruler;
     if (r.visible) {
@@ -951,7 +957,7 @@ export class Input {
       if (g?.type === 'graph' && pointInFrame(frameOf(g)!, p.x, p.y)) return new GraphPanGesture(e, g, p);
     }
     // a selection made with the barrel button can be dragged with any tool
-    if (tool !== 'select' && e.sel.size) {
+    if (tool !== 'select' && !ui.heldTool && e.sel.size) {
       const f = e.selFrame();
       const onHandle = f && !e.selLocked() && e.handles(f).some((h) => Math.hypot(p.x - h.x, p.y - h.y) <= 11 / z);
       if (f && !e.selLocked() && (onHandle || pointInFrame(f, p.x, p.y, 2 / z))) return new SelectGesture(e, this, p, ev);
@@ -1137,7 +1143,7 @@ export class Input {
     if (this.cursorDirty && now - this.cursorSentAt >= 34 && this.hoverWorld) {
       this.cursorDirty = false;
       this.cursorSentAt = now;
-      this.e.sync.emit('cursor', { pageId: this.e.pageId, x: round1(this.hoverWorld[0]), y: round1(this.hoverWorld[1]), tool: this.e.ui.get().tool }, true);
+      this.e.sync.emit('cursor', { pageId: this.e.pageId, x: round1(this.hoverWorld[0]), y: round1(this.hoverWorld[1]), tool: this.activeTool() }, true);
     }
     return !!g || this.cursorDirty;
   }
@@ -1148,7 +1154,7 @@ export class Input {
 
   /** Local cursor: a dot in the pen's colour and size, or a circle showing the eraser area. */
   drawCursor(ctx: CanvasRenderingContext2D) {
-    const e = this.e, ui = e.ui.get(), tool = ui.tool;
+    const e = this.e, ui = e.ui.get(), tool = this.activeTool();
     const kind = this.gesture?.kind;
     let css = 'default';
     const erasing = kind === 'eraser' || (!kind && tool === 'eraser');
@@ -1200,13 +1206,39 @@ export class Input {
   }
 
   // ---------- keyboard ----------
-  private onBlur = () => { this.spaceDown = false; };
+  private onBlur = () => { this.spaceDown = false; this.releaseLaserKey(false); };
   private onKeyUp = (ev: KeyboardEvent) => {
     if (ev.code === 'Space') { this.spaceDown = false; this.e.invalidateLive(); }
+    if (ev.key.toLowerCase() === 'l') this.releaseLaserKey(true);
   };
 
+  /** How long L must be held for the laser to be temporary. */
+  static readonly HOLD_MS = 250;
+
+  /** L was released: a short press keeps the laser selected, a long one returns to the previous tool. */
+  private releaseLaserKey(mayStay: boolean) {
+    const k = this.laserKey;
+    if (!k) return;
+    this.laserKey = null;
+    if (this.gesture?.kind === 'laser') this.cancelGesture();
+    this.e.ui.set({ heldTool: null });
+    if (mayStay && performance.now() - k.t <= Input.HOLD_MS) this.e.setTool('laser');
+    this.e.invalidateLive();
+  }
+
+  /** The tool a pointer-down uses right now (a held key overrides the selected tool). */
+  private activeTool() {
+    const ui = this.e.ui.get();
+    return ui.heldTool ?? ui.tool;
+  }
+
   private onKeyDown = (ev: KeyboardEvent) => {
-    if (isEditable(ev.target)) return;
+    if (isEditable(ev.target)) {
+      // after dragging a slider, Ctrl+Z must still undo
+      const k = ev.key.toLowerCase();
+      if (!(isControl(ev.target) && (((ev.ctrlKey || ev.metaKey) && (k === 'z' || k === 'y')) || ev.key === 'Escape'))) return;
+      (ev.target as HTMLElement).blur();
+    }
     const e = this.e, ui = e.ui.get();
     const mod = ev.ctrlKey || ev.metaKey;
     const key = ev.key.length === 1 ? ev.key.toLowerCase() : ev.key;
@@ -1236,7 +1268,9 @@ export class Input {
     }
     if (key >= '1' && key <= '9' && !ev.shiftKey) { e.selectFav(Number(key) - 1); return done(); }
     switch (key) {
-      case 'p': e.setTool('pen'); break;
+      case 'p':
+        if (ev.shiftKey) { this.rulerRaw = null; e.toggleRuler('protractor'); } else e.setTool('pen');
+        break;
       case 'h': e.setTool('highlighter'); break;
       case 'e':
         if (ui.tool === 'eraser') {
@@ -1246,9 +1280,25 @@ export class Input {
         break;
       case 'v': case 's': e.setTool('select'); break;
       case 'r': if (ev.shiftKey) e.setTool('shape'); else { this.rulerRaw = null; e.toggleRuler(); } break;
-      case 'l': e.setTool('laser'); break;
+      case 'l':
+        // a quick press switches to the laser as before; holding the key gives the laser only while it is held
+        if (ev.repeat || this.laserKey) break;
+        if (ui.tool === 'laser') break;
+        this.cancelGesture();
+        this.laserKey = { t: performance.now() };
+        e.ui.set({ heldTool: 'laser', popover: null });
+        e.invalidateLive();
+        break;
       case 't': e.setTool('text'); break;
       case 'g': e.setTool('graph'); break;
+      case 'k': e.setTool('tape'); break;
+      case 'i': e.setTool('space'); break;
+      case 'a':
+        if (ui.tool === 'axes') {
+          e.setSettings((s) => ({ axes: { mode: s.axes.mode === 'xy' ? 'numberLine' : 'xy' } }));
+          e.toast(e.settings.axes.mode === 'xy' ? 'x–y axes' : 'Number line');
+        } else e.setTool('axes');
+        break;
       case 'f': e.ui.set({ focus: !ui.focus, popover: null }); break;
       case '[': e.nudgeThickness(-1); break;
       case ']': e.nudgeThickness(1); break;
@@ -1308,12 +1358,10 @@ export class Input {
       }
     }
     const text = dt.getData('text/plain');
-    if (text.startsWith('mathboard-clip:')) {
-      if (e.clipboard && text === `mathboard-clip:${e.clipboard.token}`) e.pasteClipboard();
-      else e.toast('That selection was copied in another window and is no longer available');
-      return;
-    }
-    if (files.length) { void e.insertImage(files[0]); return; }
+    // board objects copied here, in another tab or on another board
+    if (text.startsWith(CLIP_PREFIX)) { void e.pasteBoardText(text).catch((err) => e.toast(`Paste failed: ${(err as Error).message}`, 'error')); return; }
+    // every image on the clipboard, not only the first
+    if (files.length) { void e.insertImages(files); return; }
     if (text.trim()) e.insertTextAtCenter(text);
   };
 
@@ -1326,6 +1374,8 @@ export class Input {
     ev.preventDefault();
     const files = Array.from(ev.dataTransfer?.files ?? []).filter((f) => f.type.startsWith('image/'));
     if (!files.length) { this.e.toast('Drop an image file (PNG, JPEG, GIF or WebP)'); return; }
-    void (async () => { for (const f of files.slice(0, 10)) await this.e.insertImage(f); })();
+    // the images land where they were dropped
+    const p = this.pt(ev);
+    void this.e.insertImages(files, { at: { x: p.x, y: p.y } });
   };
 }
