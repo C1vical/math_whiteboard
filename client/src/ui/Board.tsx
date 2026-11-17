@@ -116,7 +116,11 @@ function Overlays({ onExit, onBadPasscode }: { onExit: () => void; onBadPasscode
     return (
       <div className="center-note">
         <strong style={{ color: 'var(--text)', fontSize: 16 }}>This board could not be opened</strong>
-        <span>{fatal === 'passcode' ? 'The passcode was not accepted.' : 'The server refused the connection. Check the link and try again.'}</span>
+        <span>
+          {fatal === 'passcode' ? 'The passcode was not accepted.'
+            : fatal === 'rate' ? 'Too many wrong passcodes were tried from this network. Wait a few minutes and try again.'
+              : 'The server refused the connection. Check the link and try again.'}
+        </span>
         <div style={{ display: 'flex', gap: 8 }}>
           <button type="button" className="btn primary" onClick={() => location.reload()}>Try again</button>
           <button type="button" className="btn" onClick={onExit}>Back to start</button>

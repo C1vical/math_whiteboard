@@ -45,7 +45,7 @@ export class Sync {
       this.offlineTimer = window.setTimeout(() => { if (!this.socket.connected) this.setConn('offline'); }, 8000);
     });
     s.on('connect_error', (err: Error) => {
-      if (err.message === 'passcode') { this.h.onFatal('passcode'); return; }
+      if (err.message === 'passcode' || err.message === 'rate') { this.h.onFatal(err.message); return; }
       if (this.conn === 'connected') this.setConn('reconnecting');
       window.clearTimeout(this.offlineTimer);
       this.offlineTimer = window.setTimeout(() => { if (!this.socket.connected) this.setConn('offline'); }, 8000);

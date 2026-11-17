@@ -1,9 +1,10 @@
-import { mkdtempSync, existsSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { io as connect, type Socket } from 'socket.io-client';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp, type RunningApp } from '../server/app';
+import { readNotebookFromDisk } from '../server/store';
 import type { JoinAck, Notebook, Op, Stroke } from '../shared/types';
 import { mkStroke } from './helpers';
 
@@ -115,7 +116,7 @@ describe('server integration', () => {
     a.emit('ops', { ops: [addOp(pageId, mkStroke('keep', [1, 2, 0.5, 30, 40, 0.8], { color: '#1971c2', pen: 'fountain' }))] });
     a.emit('pageop', { op: { opId: 'pg1', kind: 'add', page: { id: 'page2', title: 'Question 2', background: 'graph' }, index: 1 } });
     await saved; // debounced atomic save finished
-    const onDisk = JSON.parse(readFileSync(path.join(dir, 'persist.json'), 'utf8')) as Notebook;
+    const onDisk = await readNotebookFromDisk(dir, 'persist');
     expect(onDisk.pages[0].objects.keep).toBeTruthy();
     a.close();
     await srv.close();
@@ -141,7 +142,7 @@ describe('server integration', () => {
     await ack;
     a.close();
     await srv.close(); // well inside the 1 s debounce window
-    const onDisk = JSON.parse(readFileSync(path.join(dir, 'flush.json'), 'utf8')) as Notebook;
+    const onDisk = await readNotebookFromDisk(dir, 'flush');
     expect(onDisk.pages[0].objects.late).toBeTruthy();
   });
 

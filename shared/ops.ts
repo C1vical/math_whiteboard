@@ -1,5 +1,5 @@
 import { strokeBBox, translateObject } from './geometry';
-import type { Background, BoardObject, Notebook, Op, Page, PageOp } from './types';
+import { DEFAULT_TITLE, type Background, type BoardObject, type Notebook, type Op, type Page, type PageOp } from './types';
 
 export interface ApplyHooks {
   /** Called when an object is translated, so render caches can be carried over. */
@@ -13,13 +13,43 @@ export function newPage(id: string, title: string, background: Background = 'bla
 }
 
 export function newNotebook(id: string, pageId: string): Notebook {
-  return { id, title: 'Untitled notebook', pages: [newPage(pageId, 'Page 1', 'grid')], updatedAt: 0 };
+  return { id, title: DEFAULT_TITLE, pages: [newPage(pageId, 'Page 1', 'grid')], updatedAt: 0 };
 }
 
 const PROTECTED = new Set(['id', 'type', 'authorId', 'createdAt', 'bbox']);
 
 function normalize(obj: BoardObject): BoardObject {
   return obj.type === 'stroke' ? { ...obj, bbox: strokeBBox(obj.points) } : obj;
+}
+
+/** The object an `update` patch produces (null clears an optional field; identity fields are protected). */
+export function patched(cur: BoardObject, patch: Record<string, unknown>): BoardObject {
+  const next: Record<string, unknown> = { ...cur };
+  for (const k of Object.keys(patch)) {
+    if (PROTECTED.has(k)) continue;
+    // null clears an optional field (JSON has no undefined)
+    if (patch[k] === null || patch[k] === undefined) delete next[k];
+    else next[k] = patch[k];
+  }
+  return normalize(next as unknown as BoardObject);
+}
+
+/** Largest coordinate magnitude the stored-object rules allow. */
+export const COORD_LIMIT = 1e9;
+
+/** true when translating the object by (dx, dy) keeps every coordinate inside the allowed range */
+export function moveStaysInRange(o: BoardObject, dx: number, dy: number, limit = COORD_LIMIT): boolean {
+  const ok = (v: number) => Number.isFinite(v) && Math.abs(v) <= limit;
+  if (!ok(dx) || !ok(dy)) return false;
+  if (o.type === 'stroke') {
+    const b = o.bbox && o.bbox.length === 4 ? o.bbox : strokeBBox(o.points);
+    return ok(b[0] + dx) && ok(b[2] + dx) && ok(b[1] + dy) && ok(b[3] + dy);
+  }
+  if (o.type === 'shape') {
+    for (let i = 0; i < o.points.length; i++) if (!ok(o.points[i] + (i % 2 === 0 ? dx : dy))) return false;
+    return true;
+  }
+  return ok(o.x + dx) && ok(o.y + dy);
 }
 
 /** Applies one op in place. Returns false when it was a no-op (missing page/object). */
@@ -40,14 +70,7 @@ export function applyOp(nb: Notebook, op: Op, hooks?: ApplyHooks): boolean {
     case 'update': {
       const cur = page.objects[op.id];
       if (!cur) return false;
-      const next: Record<string, unknown> = { ...cur };
-      for (const k of Object.keys(op.patch)) {
-        if (PROTECTED.has(k)) continue;
-        // null clears an optional field (JSON has no undefined)
-        if (op.patch[k] === null || op.patch[k] === undefined) delete next[k];
-        else next[k] = op.patch[k];
-      }
-      page.objects[op.id] = normalize(next as unknown as BoardObject);
+      page.objects[op.id] = patched(cur, op.patch);
       return true;
     }
     case 'delete': {
@@ -172,6 +195,19 @@ export function applyPageOp(nb: Notebook, op: PageOp): boolean {
       const p = findPage(nb, op.pageId);
       if (!p) return false;
       p.background = op.background;
+      return true;
+    }
+    case 'restorePage': {
+      if (findPage(nb, op.page.id)) return false;
+      const idx = Math.max(0, Math.min(nb.pages.length, op.index));
+      // own containers, so later edits to the notebook never reach into the op
+      nb.pages.splice(idx, 0, { ...op.page, objects: { ...op.page.objects }, order: [...op.page.order] });
+      return true;
+    }
+    case 'notebookTitle': {
+      const t = op.title.trim().slice(0, 120);
+      if (!t || t === nb.title) return false;
+      nb.title = t;
       return true;
     }
   }

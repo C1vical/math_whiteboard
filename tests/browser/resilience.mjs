@@ -283,7 +283,7 @@ await step('server wiped → "Restore from this device?" → restore', async () 
   await A.waitForTimeout(1800); // let the IndexedDB snapshot flush
   const counts = await st(A, () => window.mathboard.nb.pages.map((p) => p.order.length));
   await stopServer();
-  for (const f of readdirSync(DATA)) if (f.endsWith('.json')) rmSync(path.join(DATA, f));
+  for (const f of readdirSync(DATA)) if (f !== 'uploads') rmSync(path.join(DATA, f), { recursive: true, force: true }); // notebooks, page files, backups
   await startServer();
   await A.waitForSelector('.dialog:has-text("Restore this board")', { timeout: 25000 });
   await shot(A, '37-restore-prompt');

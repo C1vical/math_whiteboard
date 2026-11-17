@@ -122,11 +122,18 @@ export async function prepareImage(file: Blob): Promise<PreparedImage> {
 }
 
 export async function uploadImage(notebookId: string, blob: Blob, passcode: string): Promise<string> {
-  const res = await fetch(`/api/upload/${notebookId}`, {
+  const post = () => fetch(`/api/upload/${notebookId}`, {
     method: 'POST',
     headers: { 'content-type': blob.type, ...(passcode ? { 'x-passcode': passcode } : {}) },
     body: blob,
   });
+  let res = await post();
+  // the server limits uploads per minute; a long PDF import or a restore simply waits its turn
+  for (let tries = 0; res.status === 429 && tries < 3; tries++) {
+    const wait = Math.min(65, Math.max(1, Number(res.headers.get('retry-after')) || 5));
+    await new Promise((r) => setTimeout(r, wait * 1000));
+    res = await post();
+  }
   if (!res.ok) {
     let msg = `Upload failed (${res.status})`;
     try { msg = ((await res.json()) as { error?: string }).error || msg; } catch { /* keep default */ }

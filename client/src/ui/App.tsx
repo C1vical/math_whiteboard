@@ -45,9 +45,10 @@ function parseCode(input: string): string | null {
   return ID_RE.test(s) ? s : null;
 }
 
-async function checkPasscode(passcode: string): Promise<boolean | null> {
+async function checkPasscode(passcode: string): Promise<boolean | null | 'wait'> {
   try {
     const res = await fetch('/api/passcode', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ passcode }) });
+    if (res.status === 429) return 'wait';
     if (!res.ok) return null;
     return !!((await res.json()) as { ok?: boolean }).ok;
   } catch {
@@ -137,6 +138,7 @@ function Landing({ boardId, name: name0, passcode: pass0, passcodeRequired, noti
       setBusy(true);
       const ok = await checkPasscode(pass);
       setBusy(false);
+      if (ok === 'wait') { setError('Too many wrong passcodes were tried from this network. Wait a few minutes and try again.'); return; }
       if (ok === false) { setError('Wrong passcode.'); return; }
       if (ok === null) { setError('Could not reach the server. Is it running?'); return; }
     }

@@ -43,13 +43,25 @@ export interface Axes extends Base {
   xStep: number; yStep: number;
   showNumbers: boolean;
   mode: 'xy' | 'numberLine';
+  /** light grid lines inside the axes box */
+  grid?: boolean | null;
+  /** axis labels; default "x" and "y" */
+  xLabel?: string | null;
+  yLabel?: string | null;
+  /** label the x axis in multiples of π */
+  piTicks?: boolean | null;
 }
+
+/** Non-destructive crop: the part of the source image that is shown, as fractions (0..1) of it. */
+export interface Crop { x: number; y: number; w: number; h: number }
 
 export interface ImageObj extends Base {
   type: 'image';
   src: string;
   x: number; y: number; w: number; h: number;
   naturalW: number; naturalH: number;
+  /** x, y, w, h describe the visible (cropped) frame; the original file is never changed */
+  crop?: Crop | null;
 }
 
 export interface TextObj extends Base {
@@ -70,6 +82,10 @@ export interface Graph extends Base {
   showGrid: boolean; showNumbers: boolean;
   expressions: GraphExpr[];
   sliders?: GraphSlider[] | null;
+  /** trig functions work in radians (default) or degrees */
+  angle?: 'rad' | 'deg' | null;
+  /** label the x axis in multiples of π */
+  piTicks?: boolean | null;
 }
 
 export interface Tape extends Base {
@@ -114,6 +130,9 @@ export type PageOp = { opId: string } & (
   | { kind: 'delete'; pageId: string }
   | { kind: 'reorder'; pageId: string; index: number }
   | { kind: 'setBackground'; pageId: string; background: Background }
+  /** puts a deleted page back, with its content, at its old position (undo of 'delete') */
+  | { kind: 'restorePage'; page: Page; index: number }
+  | { kind: 'notebookTitle'; title: string }
 );
 
 // ---------- protocol ----------
@@ -153,6 +172,30 @@ export interface JoinPayload {
   pending?: string[]; // opIds I still hold unacknowledged
 }
 
+/**
+ * Shared countdown timer. Lives on the server per notebook and is never saved to disk.
+ * Running when `endsAt` is set (server clock, ms); otherwise paused at `remainingMs`.
+ */
+export interface TimerState {
+  durationMs: number;
+  remainingMs: number;
+  endsAt: number | null;
+  /** position of the widget as fractions of the board area */
+  x: number;
+  y: number;
+}
+
+export type TimerAction =
+  | { action: 'show'; durationMs: number }
+  | { action: 'start' }
+  | { action: 'pause' }
+  | { action: 'reset' }
+  | { action: 'dismiss' }
+  | { action: 'move'; x: number; y: number };
+
+/** "Bring everyone here": relayed once to the other editors. */
+export interface SummonMsg { pageId: string; camera: Camera; vw: number; vh: number }
+
 export interface JoinAck {
   ok: boolean;
   error?: string;
@@ -162,6 +205,9 @@ export interface JoinAck {
   sid?: string;
   seen?: string[]; // which of `pending` the server already applied
   users?: PresenceUser[];
+  timer?: TimerState | null;
+  /** server clock at the time of the reply, to correct for clock differences */
+  now?: number;
 }
 
 export const USER_COLORS = [
@@ -171,3 +217,5 @@ export const USER_COLORS = [
 
 export const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 export const INK = 'ink';
+export const DEFAULT_TITLE = 'Untitled notebook';
+export const MAX_TIMER_MS = 24 * 60 * 60 * 1000;
