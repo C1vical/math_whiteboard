@@ -68,6 +68,28 @@ Image uploads are limited to 120 per minute per address.
 - Boards nobody has open are dropped from memory after five minutes (once saved). Opening a link
   to a board that does not exist creates nothing on disk until something is drawn.
 
+### Deleted boards
+
+**☰ → Delete board…** (or the trash button next to a board in *Recent boards* on the start page)
+deletes a board for everyone who has its link. Anyone who has it open is sent back to the start
+page with a message saying who deleted it. Each device forgets its own copy of the board, and the
+link can no longer be opened, so an old copy on an iPad cannot bring the board back.
+
+The files are not erased straight away. The server moves everything that belonged to the board
+(`<code>.json`, `<code>.pages/`, its backups and its images) into `DATA_DIR/deleted/<code>/`, next
+to a `deleted.json` that records its name, who deleted it and when. **After 30 days** those files
+are removed. The small `deleted.json` stays, so the code stays deleted.
+
+To bring a board back within the 30 days:
+
+1. Stop the server.
+2. Move `<code>.json`, `<code>.pages` and any `<code>.backup-…` files from `DATA_DIR/deleted/<code>/`
+   back into `DATA_DIR`, and move `DATA_DIR/deleted/<code>/uploads` to `DATA_DIR/uploads/<code>`.
+3. Delete the now-empty `DATA_DIR/deleted/<code>/` folder and start the server again.
+
+On a free host without a persistent disk the `deleted` folder is lost on restart like everything
+else, so download a backup (**☰ → Back up notebook**) before deleting a board you might want again.
+
 ## Sharing it with your co-teacher
 
 ### Option A — run it on your own computer (easiest, free, recommended)
@@ -190,6 +212,8 @@ The row of pens in the toolbar is yours (saved in this browser). Click a pen to 
 again** to open its settings: type, colour (16 swatches, custom, recent), thickness (five presets
 and a fine slider with a live preview) and stabilization. **+** adds a pen (up to 15); drag pens to
 reorder them, or use the arrows and *Delete pen* in the popover. Keys **1–9** pick pens 1–9.
+The highlighter is its own tool (**H**) rather than one of the pens; a pen can still be switched to
+the *Highlighter* type for a second highlighter colour.
 The same "click the selected tool again" rule opens the settings of the highlighter, eraser,
 lasso, shapes, laser, insert-space, text, axes and tape tools.
 
@@ -298,5 +322,6 @@ See [PLAN.md](./PLAN.md) for the architecture, protocol and rendering strategy.
   thousand strokes); a larger selection still pastes within the same tab.
 - In the PDF, ink and shapes are vector paths; images, text, graphs, axes and tape are embedded as
   pictures at print resolution (300 dpi or more, never above the image's own resolution).
-- Anyone with a board link (and the passcode, if set) can edit — there are no view-only links.
+- Anyone with a board link (and the passcode, if set) can edit, and delete the board — there are no
+  view-only links.
   Students are expected to watch the Zoom share.

@@ -92,3 +92,4 @@ export const timerMsg = z.discriminatedUnion('action', [
 export const restoreMsg = z.object({ notebook });
 /** asks for a server-side backup of the notebook as it is now (before a notebook-wide change) */
 export const backupMsg = z.object({}).strict();
+export const deleteBoardMsg = z.object({}).strict();

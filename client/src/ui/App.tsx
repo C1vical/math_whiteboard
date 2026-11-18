@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import { customAlphabet, nanoid } from 'nanoid';
 import { ID_RE } from '../../../shared/types';
+import { forgetCachedBoard } from '../engine/idb';
 import { loadSettings } from '../engine/store';
 import { Board } from './Board';
-import { loadRecent, ls, rememberBoard } from './util';
+import { Trash2 } from 'lucide-react';
+import { Dialog } from './common';
+import { forgetBoard, loadRecent, ls, rememberBoard, type RecentBoard } from './util';
 
 const KEYS = { name: 'mathboard.name', user: 'mathboard.userId', pass: 'mathboard.passcode' };
 // no look-alike characters, so a code can be read out loud over Zoom
@@ -29,6 +32,20 @@ function parseCode(input: string): string | null {
   const m = /\/b\/([A-Za-z0-9_-]{1,64})/.exec(s);
   if (m) return m[1];
   return ID_RE.test(s) ? s : null;
+}
+
+/** Deletes a board from the start page. Resolves with an error message, or null when it is gone. */
+async function deleteBoardRemote(id: string, passcode: string, by: string): Promise<string | null> {
+  try {
+    const res = await fetch(`/api/boards/${encodeURIComponent(id)}/delete`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-passcode': passcode }, body: JSON.stringify({ by }),
+    });
+    if (res.ok) return null;
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    return res.status === 401 ? 'Wrong passcode.' : body.error ?? 'The board could not be deleted.';
+  } catch {
+    return 'Could not reach the server. Is it running?';
+  }
 }
 
 async function checkPasscode(passcode: string): Promise<boolean | null | 'wait'> {
@@ -77,6 +94,11 @@ export function App() {
   }, [inBoard, boardId]);
 
   const onExit = useCallback(() => go(null), [go]);
+  const onDeleted = useCallback((message: string) => {
+    if (boardId) forgetBoard(boardId);
+    setNotice(message);
+    go(null);
+  }, [boardId, go]);
   const onBadPasscode = useCallback(() => {
     ls.del(KEYS.pass);
     setPasscode('');
@@ -88,7 +110,7 @@ export function App() {
     return <div className="landing"><div className="spinner" /></div>;
   }
   if (inBoard && boardId) {
-    return <Board key={boardId} notebookId={boardId} name={name} userId={userId} passcode={passcode} onExit={onExit} onBadPasscode={onBadPasscode} />;
+    return <Board key={boardId} notebookId={boardId} name={name} userId={userId} passcode={passcode} onExit={onExit} onBadPasscode={onBadPasscode} onDeleted={onDeleted} />;
   }
   return (
     <Landing
@@ -114,7 +136,30 @@ function Landing({ boardId, name: name0, passcode: pass0, passcodeRequired, noti
   const [code, setCode] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [recent] = useState(loadRecent);
+  const [recent, setRecent] = useState(loadRecent);
+  const [toDelete, setToDelete] = useState<RecentBoard | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deletedMsg, setDeletedMsg] = useState<string | null>(null);
+
+  const askDelete = (r: RecentBoard) => {
+    if (passcodeRequired && !pass) { setError('Enter the passcode first, then delete the board.'); return; }
+    setError(null);
+    setDeleteError(null);
+    setToDelete(r);
+  };
+  const confirmDelete = async () => {
+    if (!toDelete) return;
+    setDeleting(true);
+    const err = await deleteBoardRemote(toDelete.id, passcodeRequired ? pass : '', name.trim().slice(0, 40));
+    setDeleting(false);
+    if (err) { setDeleteError(err); return; }
+    forgetBoard(toDelete.id);
+    void forgetCachedBoard(toDelete.id);
+    setRecent(loadRecent());
+    setDeletedMsg(`${toDelete.title ? `“${toDelete.title}”` : `Board ${toDelete.id}`} was deleted.`);
+    setToDelete(null);
+  };
 
   const enter = async (id: string | null) => {
     const n = name.trim().slice(0, 40);
@@ -179,16 +224,38 @@ function Landing({ boardId, name: name0, passcode: pass0, passcodeRequired, noti
               <div className="recent">
                 <div className="recent-title">Recent boards on this device</div>
                 {recent.map((r) => (
-                  <button key={r.id} type="button" disabled={busy} onClick={() => void enter(r.id)}>
-                    <span className="recent-name">{r.title ? <strong>{r.title}</strong> : <em>Untitled</em>}<code>{r.id}</code></span>
-                    <span>{new Date(r.t).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</span>
-                  </button>
+                  <div key={r.id} className="recent-row">
+                    <button type="button" className="recent-open" disabled={busy} onClick={() => void enter(r.id)}>
+                      <span className="recent-name">{r.title ? <strong>{r.title}</strong> : <em>Untitled</em>}<code>{r.id}</code></span>
+                      <span>{new Date(r.t).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</span>
+                    </button>
+                    <button
+                      type="button" className="recent-delete" disabled={busy} onClick={() => askDelete(r)}
+                      title={`Delete ${r.title ? `“${r.title}”` : r.id}`} aria-label={`Delete board ${r.title || r.id}`}
+                    >
+                      <Trash2 size={15} />
+                    </button>
+                  </div>
                 ))}
               </div>
             )}
           </>
         )}
+        {deletedMsg && <div className="notice" role="status">{deletedMsg}</div>}
       </form>
+      {toDelete && (
+        <Dialog
+          title={toDelete.title ? `Delete “${toDelete.title}”?` : `Delete board ${toDelete.id}?`} onClose={deleting ? undefined : () => setToDelete(null)} width={420}
+          actions={<>
+            <button type="button" className="btn" disabled={deleting} onClick={() => setToDelete(null)}>Cancel</button>
+            <button type="button" className="btn danger solid" disabled={deleting} onClick={() => void confirmDelete()}>{deleting ? 'Deleting…' : 'Delete board'}</button>
+          </>}
+        >
+          <p>The board is deleted for everyone who has its link, with all its pages and images. Anyone who has it open now is sent back to the start page.</p>
+          <p className="hint">If it was a mistake, the server keeps the board's files for 30 days, so it can still be recovered (see “Deleted boards” in the README).</p>
+          {deleteError && <div className="notice error" role="alert">{deleteError}</div>}
+        </Dialog>
+      )}
     </div>
   );
 }

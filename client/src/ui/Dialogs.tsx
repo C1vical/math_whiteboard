@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { DEFAULT_EXPORT, exportPagePng, exportPdf, importNotebookJson, type ExportOptions } from '../engine/exporter';
 import { importPdfPages, openPdf, type OpenPdf } from '../engine/pdfImport';
 import { defaultSettings } from '../engine/store';
+import { DEFAULT_TITLE } from '../../../shared/types';
 import { Dialog, MOD, Section, Segmented, Toggle, useEngine, useUI } from './common';
 import { ls } from './util';
 
@@ -115,9 +116,53 @@ export function Dialogs() {
       return <PdfDialog onClose={close} />;
     case 'importJson':
       return <ImportJsonDialog onClose={close} />;
+    case 'deleteBoard':
+      return <DeleteBoardDialog onClose={close} />;
     default:
       return null;
   }
+}
+
+/** Deletes the whole board for everyone; anyone else on it is sent to the start page. */
+function DeleteBoardDialog({ onClose }: { onClose: () => void }) {
+  const engine = useEngine();
+  const title = useUI((s) => s.title);
+  const users = useUI((s) => s.users);
+  const me = useUI((s) => s.me);
+  const pages = useUI((s) => s.pages);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const named = !!title && title !== DEFAULT_TITLE;
+  const others = [...new Set(users.filter((u) => u.sid !== me.sid).map((u) => u.name))];
+  const run = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await engine.deleteBoard(); // on success the board closes and this dialog with it
+    } catch (err) {
+      setError((err as Error).message);
+      setBusy(false);
+    }
+  };
+  return (
+    <Dialog
+      title={named ? `Delete “${title}”?` : 'Delete this board?'} onClose={busy ? undefined : onClose} width={440}
+      actions={<>
+        <button type="button" className="btn" disabled={busy} onClick={onClose}>Cancel</button>
+        <button type="button" className="btn danger solid" disabled={busy} onClick={() => void run()}>{busy ? 'Deleting…' : 'Delete board'}</button>
+      </>}
+    >
+      <p>
+        The board is deleted for everyone who has its link: {pages.length === 1 ? 'its page' : `all ${pages.length} pages`}, images and backups.
+        It can no longer be opened.
+      </p>
+      {others.length > 0 && (
+        <p><strong>{others.join(', ')}</strong> {others.length === 1 ? 'is' : 'are'} on it now and will be sent back to the start page.</p>
+      )}
+      <p className="hint">If it was a mistake, the server keeps the board's files for 30 days, so it can still be recovered (see “Deleted boards” in the README).</p>
+      {error && <div className="notice error" role="alert">{error}</div>}
+    </Dialog>
+  );
 }
 
 /** Notebook-wide reset. States how many pages are affected; the server keeps a backup first. */

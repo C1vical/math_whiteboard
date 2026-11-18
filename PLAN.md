@@ -104,6 +104,14 @@ exactly what is stored.
 - **Rooms** are reference-counted by joined sockets. When the last one leaves, the room is evicted
   after a delay (5 min) once its save has flushed; a join during eviction cancels it. Recently seen
   opIds (and a running countdown) outlive the eviction, so re-sent ops are still de-duplicated.
+- **Deleting a board** (`deleteBoard` on the socket, or `POST /api/boards/:id/delete` from the start
+  page, passcode in `x-passcode`, 30 per address per 10 min): the id is marked deleted at once (joins
+  are answered `error: 'deleted'`, uploads 410, saves refused), everyone else in it gets `deleted {by}`
+  and is removed from the room, pending changes get one last save, and every file of the board moves
+  to `deleted/<id>/` next to a `deleted.json` marker. The daily housekeeping removes those files after
+  30 days and keeps the marker, so the id stays deleted (the set is read from `deleted/` on startup).
+  Clients drop their IndexedDB copy and the recent-list entry. A code that was never saved is not
+  marked at all.
   Joining an unknown id writes nothing until the first change.
 - **Uploads**: per-notebook byte quota (`UPLOAD_QUOTA_MB`), checked from Content-Length before the body
   is read and again after; unreferenced files older than 24 h are swept on startup and daily (a
@@ -133,7 +141,7 @@ Client → server: `join` (ack: snapshot, countdown, server clock), `ops`, `page
 `live:end`, `live:erase`, `cursor` (volatile), `laser`, `ruler`, `viewport`, `page`
 (which page I am on), `rename` (my display name), `summon` (bring everyone to my page and view, once),
 `timer` (shared countdown actions), `backup` (keep a server copy first), `restore` (upload a full
-snapshot; the server backs up the current one first).
+snapshot; the server backs up the current one first), `deleteBoard` (delete it for everyone).
 
 The countdown (`TimerState`: duration, remaining, `endsAt` on the server clock, position) lives in
 the room in memory only: never written to disk, kept across a room eviction like the seen opIds, and
@@ -142,7 +150,7 @@ sent with the join ack together with the server clock, so a late joiner shows th
 and it does not start a lasting follow.
 
 Server → client: `ops {seq, ops, from, t}` to others and `ack {seq, opIds, t}` to the
-sender; `pageop`; `presence`; `snapshot` (after restore); `saved`; relayed live events
+sender; `pageop`; `presence`; `snapshot` (after restore); `saved`; `deleted {by}`; relayed live events
 tagged with `userId`.
 
 Op kinds: `add`, `update` (shallow patch), `delete`, `reorder`, plus `move {ids,dx,dy}`

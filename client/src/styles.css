@@ -884,8 +884,11 @@ kbd {
 :root[data-theme='dark'] .notice.error { background: #4a1f1f; color: #ffa8a8; }
 .recent { display: flex; flex-direction: column; gap: 4px; }
 .recent-title { font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
-.recent button {
+.recent-row { display: flex; gap: 4px; min-width: 0; }
+.recent-open {
   display: flex;
+  flex: 1;
+  min-width: 0;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
@@ -896,9 +899,21 @@ kbd {
   background: var(--panel-2);
   font-size: 13px;
 }
-.recent button:hover { background: var(--hover); }
-.recent button code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-.recent button > span:last-child { color: var(--muted); font-size: 12px; flex: none; }
+.recent-open:hover { background: var(--hover); }
+.recent-open code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.recent-open > span:last-child { color: var(--muted); font-size: 12px; flex: none; }
+.recent-delete {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 36px;
+  height: 36px;
+  border: none;
+  border-radius: 8px;
+  background: var(--panel-2);
+  color: var(--muted);
+}
+.recent-delete:hover:not(:disabled) { background: var(--hover); color: var(--danger); }
 .recent-name { display: flex; align-items: baseline; gap: 8px; min-width: 0; overflow: hidden; }
 .recent-name strong, .recent-name em { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
 .recent-name em { color: var(--muted); font-weight: 400; }

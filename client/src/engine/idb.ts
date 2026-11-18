@@ -48,6 +48,22 @@ async function put(store: string, key: string, value: unknown): Promise<void> {
   } catch { /* ignore */ }
 }
 
+/** Forgets a deleted board on this device: its notebook copy and its images. */
+export async function forgetCachedBoard(id: string): Promise<void> {
+  try {
+    const db = await open();
+    await new Promise<void>((resolve) => {
+      const tx = db.transaction(['notebooks', 'images'], 'readwrite');
+      tx.objectStore('notebooks').delete(id);
+      const prefix = `/uploads/${id}/`;
+      tx.objectStore('images').delete(IDBKeyRange.bound(prefix, `${prefix}￿`));
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+      tx.onabort = () => resolve();
+    });
+  } catch { /* ignore */ }
+}
+
 export const getCachedNotebook = (id: string) => get<Notebook>('notebooks', id);
 export const putCachedNotebook = (nb: Notebook) => put('notebooks', nb.id, nb);
 export const getCachedImage = (src: string) => get<Blob>('images', src);

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   Check, CirclePlay, CloudOff, Eraser, FileDown, FileJson, FileUp, ImageDown, ImagePlus, Keyboard, LoaderCircle, LocateFixed, LogOut, Maximize2, Menu, Moon, RotateCcw, Settings,
-  Share2, StickyNote, Sun,
+  Share2, StickyNote, Sun, Trash2,
 } from 'lucide-react';
 import { DEFAULT_TITLE, type Background } from '../../../shared/types';
 import { exportNotebookJson } from '../engine/exporter';
@@ -208,6 +208,7 @@ export function TopRight({ onExit, onInsertImage }: { onExit: () => void; onInse
               <Keyboard size={17} />Keyboard shortcuts <span className="key">?</span>
             </button>
             <button type="button" className="menu-item" onClick={run(onExit)}><LogOut size={17} />Leave board</button>
+            <button type="button" className="menu-item danger" onClick={run(() => engine.ui.set({ dialog: 'deleteBoard' }))}><Trash2 size={17} />Delete board…</button>
           </div>
         </Popover>
       )}

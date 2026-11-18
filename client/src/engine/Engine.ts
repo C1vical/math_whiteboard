@@ -14,7 +14,7 @@ import {
   type RulerState, type StrokeStyle, type TimerAction,
 } from '../../../shared/types';
 import { graphModule, loadGraph, onGraphLoaded } from './graphLoader';
-import { getCachedNotebook, putCachedNotebook } from './idb';
+import { forgetCachedBoard, getCachedNotebook, putCachedNotebook } from './idb';
 import { ImageCache, prepareImage, uploadImage, type PreparedImage } from './images';
 import { drawCursor, drawLaser, drawRuler, LASER_MS, type LaserPoint } from './overlay';
 import { carryPath, drawBackground, drawLiveStroke, drawObject, drawTape, FONT, paintBounds, type RenderEnv } from './render';
@@ -92,6 +92,8 @@ export class Engine {
   private ro: ResizeObserver;
   private dprQuery: MediaQueryList | null = null;
   private destroyed = false;
+  /** the board was deleted: nothing more is cached on this device or sent */
+  private gone = false;
   private offGraph: () => void;
   /** graphs on this page with a playing slider: they are redrawn every frame */
   private animated: string[] = [];
@@ -164,6 +166,7 @@ export class Engine {
       onTimer: (timer) => ui.set({ timer }),
       onStatus: () => ui.set({ conn: this.sync.conn, saving: this.sync.saving }),
       onFatal: (reason) => ui.set({ fatal: reason }),
+      onDeleted: (by) => this.onDeleted(by === null ? { by: '', mine: false, refused: true } : { by, mine: false, refused: false }),
       onLive: (ev, data) => this.onLive(ev, data),
     }, { notebookId: opts.notebookId, userId: opts.userId, name: opts.name, passcode: opts.passcode, color: localStorage.getItem('mathboard.color') ?? undefined });
   }
@@ -1069,12 +1072,31 @@ export class Engine {
     if (!ok) throw new Error('the server did not accept the notebook');
   }
 
+  /** Deletes the board for everyone (the server keeps its files for 30 days). */
+  async deleteBoard(): Promise<void> {
+    const r = await this.sync.deleteBoard();
+    if (!r.ok) throw new Error(r.error && r.error.includes(' ') ? r.error : 'The server could not delete the board. Try again.');
+    this.onDeleted({ by: this.me.name, mine: true, refused: false });
+  }
+
+  /** The board is gone: stop syncing, forget this device's copy, and let the UI leave. */
+  private onDeleted(info: { by: string; mine: boolean; refused: boolean }) {
+    if (this.gone) return;
+    this.gone = true;
+    this.cachePaused = true; // otherwise the copy would be written again when the board closes
+    window.clearTimeout(this.cacheTimer);
+    this.sync.pending = [];
+    this.sync.close();
+    void forgetCachedBoard(this.opts.notebookId);
+    this.ui.set({ deleted: info, restore: null, dialog: null });
+  }
+
   private scheduleCache() {
     if (this.cachePaused || this.cacheTimer) return;
     this.cacheTimer = window.setTimeout(() => { this.cacheTimer = 0; this.flushCache(); }, 1500);
   }
   private flushCache() {
-    if (this.cachePaused || !this.ui.get().ready) return;
+    if (this.gone || this.cachePaused || !this.ui.get().ready) return;
     this.nb.updatedAt = Math.max(this.nb.updatedAt, this.sync.latestT);
     void putCachedNotebook(this.nb);
   }

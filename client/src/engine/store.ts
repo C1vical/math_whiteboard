@@ -26,6 +26,8 @@ export interface Settings {
   dark: boolean;
   sidebar: boolean;
   recentColors: string[];
+  /** version of the saved settings, for one-time fixes of older saves */
+  v: number;
 }
 
 export const PEN_COLORS = [
@@ -43,6 +45,9 @@ export const SIZE_PRESETS: Record<PenType, number[]> = {
 };
 export const ERASER_SIZES = [8, 16, 30]; // radius, screen px
 
+const SETTINGS_VERSION = 2;
+
+// The highlighter has its own tool (H), so it is not among the default pens.
 export const defaultSettings = (): Settings => ({
   favs: [
     { id: 'f1', pen: 'ballpoint', color: 'ink', size: 2.5, stab: 30 },
@@ -50,7 +55,6 @@ export const defaultSettings = (): Settings => ({
     { id: 'f3', pen: 'ballpoint', color: '#e03131', size: 2.5, stab: 30 },
     { id: 'f4', pen: 'ballpoint', color: '#2f9e44', size: 2.5, stab: 30 },
     { id: 'f5', pen: 'pencil', color: 'ink', size: 3, stab: 30 },
-    { id: 'f6', pen: 'highlighter', color: '#ffe033', size: 22, stab: 30 },
   ],
   activeFav: 0,
   hl: { color: '#ffe033', size: 22, straight: false },
@@ -70,6 +74,7 @@ export const defaultSettings = (): Settings => ({
   dark: false,
   sidebar: true,
   recentColors: [],
+  v: SETTINGS_VERSION,
 });
 
 const KEY = 'mathboard.settings.v1';
@@ -92,6 +97,16 @@ export function loadSettings(): Settings {
       text: { ...d.text, ...s.text }, axes: { ...d.axes, ...s.axes }, tape: { ...d.tape, ...s.tape },
     };
     if (!Array.isArray(merged.favs) || !merged.favs.length) merged.favs = d.favs;
+    if (!(Number(s.v) >= 2)) {
+      // older saves started with a yellow highlighter pen next to the Highlighter tool (H), so
+      // there were two highlighters; that default pen is dropped once (one someone added stays)
+      const i = merged.favs.findIndex((f) => f?.id === 'f6' && f.pen === 'highlighter');
+      if (i >= 0 && merged.favs.length > 1) {
+        merged.favs = merged.favs.filter((_, j) => j !== i);
+        if (merged.activeFav > i) merged.activeFav--;
+      }
+    }
+    merged.v = SETTINGS_VERSION;
     merged.activeFav = Math.max(0, Math.min(merged.favs.length - 1, merged.activeFav | 0));
     return merged;
   } catch {
@@ -164,7 +179,12 @@ export interface UIState {
   toasts: Toast[];
   restore: { reason: 'empty' | 'older' } | null;
   graphInteract: boolean;
-  dialog: null | 'shortcuts' | 'settings' | 'pdf' | 'clearPage' | 'clearMine' | 'importJson' | 'export' | 'resetInk' | 'resetInkAll' | 'coverAll';
+  dialog: null | 'shortcuts' | 'settings' | 'pdf' | 'clearPage' | 'clearMine' | 'importJson' | 'export' | 'resetInk' | 'resetInkAll' | 'coverAll' | 'deleteBoard';
+  /**
+   * The board was deleted. `by`: who deleted it ('' when not known); `mine` when it was me;
+   * `refused` when it was already deleted before it could be opened.
+   */
+  deleted: { by: string; mine: boolean; refused: boolean } | null;
   /** what the export dialog was opened for */
   exportKind: ExportKind;
   /** shared countdown timer (server state) */
@@ -206,6 +226,6 @@ export function initialUI(name: string, userId: string): UIState {
     canUndo: false, canRedo: false, sel: null, selBusy: false,
     ruler: { visible: false, kind: 'ruler', x: 0, y: 0, angle: 0 },
     popover: null, textEdit: null, following: null, replay: null, focus: false, toasts: [], restore: null,
-    graphInteract: false, dialog: null, pendingFile: null, exportKind: 'pdf', timer: null, crop: null,
+    graphInteract: false, dialog: null, pendingFile: null, exportKind: 'pdf', timer: null, crop: null, deleted: null,
   };
 }

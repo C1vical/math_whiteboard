@@ -3,7 +3,7 @@ import path from 'node:path';
 import { nanoid } from 'nanoid';
 import { findPage, newNotebook, notebookIsEmpty } from '../shared/ops';
 import { salvageNotebook, sanitize } from '../shared/schema';
-import { ID_RE, type Notebook, type Page, type TimerState } from '../shared/types';
+import { DEFAULT_TITLE, ID_RE, type Notebook, type Page, type TimerState } from '../shared/types';
 
 export { sanitize };
 
@@ -43,6 +43,8 @@ const RETIRED_ROOMS = 500;
 const RETIRED_MS = 24 * 60 * 60 * 1000;
 const BACKUPS_KEPT = 5;
 export const UPLOAD_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+/** how long a deleted board's files are kept in deleted/<id>/ */
+export const DELETED_KEEP_MS = 30 * 24 * 60 * 60 * 1000;
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
 const stamp = () => new Date().toISOString().replace(/[-:.]/g, '');
@@ -100,6 +102,8 @@ export class Store {
   /** objects are never mutated in place (every change replaces them), so identity is a valid key */
   private objJson = new WeakMap<object, string>();
   private usage = new Map<string, Promise<number>>();
+  /** ids of deleted boards: they can never be opened, saved to or uploaded to again */
+  private deleted = new Set<string>();
   private closed = false;
   onSaved: (id: string, t: number) => void = () => {};
 
@@ -114,6 +118,8 @@ export class Store {
   }
 
   get uploadsDir() { return path.join(this.dataDir, 'uploads'); }
+  /** deleted boards: `deleted/<id>/` holds the moved files and a `deleted.json` marker */
+  get deletedDir() { return path.join(this.dataDir, 'deleted'); }
   file(id: string) { return path.join(this.dataDir, `${id}.json`); }
   pagesDir(id: string) { return path.join(this.dataDir, `${id}.pages`); }
   pageFile(id: string, pageId: string) { return path.join(this.pagesDir(id), pageFileName(pageId)); }
@@ -122,6 +128,7 @@ export class Store {
 
   async init() {
     await fs.mkdir(this.uploadsDir, { recursive: true });
+    for (const name of await fs.readdir(this.deletedDir).catch(() => [] as string[])) if (ID_RE.test(name)) this.deleted.add(name);
   }
 
   /** number of notebooks currently held in memory */
@@ -155,7 +162,7 @@ export class Store {
   }
 
   private scheduleEvict(id: string) {
-    if (this.closed || this.evictTimers.has(id) || !this.rooms.has(id)) return;
+    if (this.closed || this.evictTimers.has(id) || !this.rooms.has(id) || this.deleted.has(id)) return;
     const t = setTimeout(() => {
       this.evictTimers.delete(id);
       void this.evict(id).catch((err) => this.log('evict failed:', (err as Error).message));
@@ -284,6 +291,7 @@ export class Store {
 
   /** Marks the notebook as changed. `pages` are the pages whose content (objects, order) changed. */
   markDirty(room: Room, pages?: Iterable<string>) {
+    if (this.deleted.has(room.nb.id)) return;
     if (pages) for (const p of pages) room.dirtyPages.add(p);
     room.dirty = true;
     if (room.timer) return;
@@ -332,13 +340,15 @@ export class Store {
     });
   }
 
-  private async save(room: Room): Promise<void> {
+  /** `final`: the last save of a board that is being deleted (anything else is refused for it) */
+  private async save(room: Room, final = false): Promise<void> {
     if (room.saving) {
       await room.saving;
       if (!room.dirty) return;
     }
-    room.dirty = false;
     const id = room.nb.id;
+    if (this.deleted.has(id) && !final) return; // its files are moving to deleted/; never write new ones
+    room.dirty = false;
     const t = room.nb.updatedAt;
     if (room.legacy) for (const p of room.nb.pages) room.dirtyPages.add(p.id);
     const pages = [...room.dirtyPages];
@@ -404,6 +414,7 @@ export class Store {
    */
   async backup(room: Room): Promise<string | null> {
     const nb = room.nb;
+    if (this.deleted.has(nb.id)) throw new Error('the board was deleted');
     if (notebookIsEmpty(nb)) return null;
     const name = `${this.backupPrefix(nb.id)}${stamp()}.json`;
     const pages = [...nb.pages];
@@ -424,6 +435,92 @@ export class Store {
     const mine = (await fs.readdir(this.dataDir)).filter((n) => n.startsWith(this.backupPrefix(nb.id)) && n.endsWith('.json')).sort();
     for (const old of mine.slice(0, Math.max(0, mine.length - BACKUPS_KEPT))) await fs.unlink(path.join(this.dataDir, old)).catch(() => {});
     return name;
+  }
+
+  // ---------- deleting a board ----------
+
+  isDeleted(id: string): boolean { return this.deleted.has(id); }
+
+  /** Is there anything to delete: the board is open, or something of it is on disk. */
+  async exists(id: string): Promise<boolean> {
+    if (this.rooms.has(id)) return true;
+    const there = (p: string) => fs.stat(p).then(() => true, () => false);
+    return (await there(this.file(id))) || (await there(path.join(this.uploadsDir, id)));
+  }
+
+  /**
+   * Deletes a board for everyone. Its files (notebook, pages, backups, kept copies and images)
+   * move to `deleted/<id>/` next to a `deleted.json` marker; they can be moved back by hand until
+   * `purgeDeleted` removes them. The id is refused from then on (join, save, upload), so a device
+   * with an old copy or queued changes cannot bring the board back by accident.
+   * The id is marked before the first await: callers can rely on `isDeleted` right away.
+   */
+  async deleteNotebook(id: string, by: string): Promise<void> {
+    if (this.deleted.has(id)) return;
+    this.deleted.add(id);
+    const t = this.evictTimers.get(id);
+    if (t) { clearTimeout(t); this.evictTimers.delete(id); }
+    let title = '';
+    const p = this.rooms.get(id);
+    if (p) {
+      const room = await p.catch(() => null);
+      if (room) {
+        title = room.nb.title;
+        if (room.timer) { clearTimeout(room.timer); room.timer = null; }
+        if (room.dirty || room.saving) await this.save(room, true); // so the kept copy is complete
+      }
+      if (this.rooms.get(id) === p) this.rooms.delete(id);
+    } else {
+      try { title = String((JSON.parse(await fs.readFile(this.file(id), 'utf8')) as { title?: unknown }).title ?? ''); } catch { /* no name known */ }
+    }
+    this.refs.delete(id);
+    this.retired.delete(id);
+    this.usage.delete(id);
+
+    const dir = path.join(this.deletedDir, id);
+    await fs.mkdir(dir, { recursive: true });
+    // the marker first: even if a move below fails, the board stays deleted after a restart
+    const marker = JSON.stringify({ id, title, by, deletedAt: Date.now() });
+    await atomicWrite(path.join(dir, 'deleted.json'), (tmp) => fs.writeFile(tmp, marker, 'utf8'));
+    // ids never contain a dot, so "<id>." matches this board's files only
+    const moves: [string, string][] = (await fs.readdir(this.dataDir))
+      .filter((n) => n.startsWith(`${id}.`))
+      .map((n) => [path.join(this.dataDir, n), path.join(dir, n)]);
+    moves.push([path.join(this.uploadsDir, id), path.join(dir, 'uploads')]);
+    for (const [from, to] of moves) {
+      try {
+        await fs.rename(from, to);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        // Windows can refuse a rename while a file is briefly open; retry once
+        await new Promise((r) => setTimeout(r, 100));
+        await fs.rename(from, to).catch((e2) => this.log(`delete ${id}: could not move ${path.basename(from)}:`, (e2 as Error).message));
+      }
+    }
+    this.log(`${id}${title && title !== DEFAULT_TITLE ? ` ("${title}")` : ''} was deleted by ${by || 'someone'}; its files are in deleted/${id}/`);
+  }
+
+  /**
+   * Removes the files of boards deleted more than `maxAgeMs` ago. The marker stays, so the id
+   * stays deleted. Returns the ids whose files were removed.
+   */
+  async purgeDeleted(now = Date.now(), maxAgeMs = DELETED_KEEP_MS): Promise<string[]> {
+    const purged: string[] = [];
+    for (const id of await fs.readdir(this.deletedDir).catch(() => [] as string[])) {
+      if (!ID_RE.test(id)) continue;
+      const dir = path.join(this.deletedDir, id);
+      try {
+        const at = Number((JSON.parse(await fs.readFile(path.join(dir, 'deleted.json'), 'utf8')) as { deletedAt?: unknown }).deletedAt);
+        if (!(at > 0) || now - at < maxAgeMs) continue;
+        const rest = (await fs.readdir(dir)).filter((n) => n !== 'deleted.json');
+        if (!rest.length) continue;
+        for (const n of rest) await fs.rm(path.join(dir, n), { recursive: true, force: true });
+        purged.push(id);
+      } catch (err) {
+        this.log(`deleted/${id} was left alone:`, (err as Error).message);
+      }
+    }
+    return purged;
   }
 
   // ---------- uploads: quota and orphan sweep ----------

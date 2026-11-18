@@ -22,6 +22,8 @@ export interface AppLimits {
   uploadsPerMinute?: number;
   /** total bytes of uploads a single notebook may hold */
   uploadQuotaBytes?: number;
+  /** boards one address may delete per 10 minutes */
+  deletes?: number;
 }
 
 export interface AppOptions {
@@ -82,6 +84,8 @@ export async function createApp(opts: AppOptions = {}): Promise<RunningApp> {
   // wrong passcodes (HTTP check, socket handshake, join and upload share one allowance per address)
   const fails = new RateLimiter(opts.limits?.passcodeFails ?? 10, opts.limits?.passcodeWindowMs ?? 5 * 60 * 1000);
   const uploads = new RateLimiter(opts.limits?.uploadsPerMinute ?? 120, 60 * 1000);
+  const deletes = new RateLimiter(opts.limits?.deletes ?? 30, 10 * 60 * 1000);
+  const TOO_MANY_DELETES = 'Too many boards were deleted from this network just now. Wait a few minutes and try again.';
 
   const passOk = (given: unknown): boolean => {
     if (!passcode) return true;
@@ -118,6 +122,7 @@ export async function createApp(opts: AppOptions = {}): Promise<RunningApp> {
     try {
       const nbId = req.params.notebookId;
       if (!ID_RE.test(nbId)) return void res.status(400).json({ error: 'Invalid notebook id' });
+      if (store.isDeleted(nbId)) return void res.status(410).json({ error: 'This board was deleted' });
       const ip = ipOf(req);
       if (passcode) {
         if (fails.blocked(ip)) return void tooMany(res, fails, ip, TOO_MANY_TRIES);
@@ -143,6 +148,7 @@ export async function createApp(opts: AppOptions = {}): Promise<RunningApp> {
       const ext = sniffImage(body);
       if (!ext || EXT_MIME[ext] !== mime) return void res.status(415).json({ error: 'File content is not a valid image' });
       if ((await store.uploadUsage(nbId)) + body.length > quota) return void res.status(413).json({ error: quotaMessage });
+      if (store.isDeleted(nbId)) return void res.status(410).json({ error: 'This board was deleted' });
       // the path is built only from the validated id and a generated name
       const dir = path.join(store.uploadsDir, nbId);
       await fs.mkdir(dir, { recursive: true });
@@ -153,6 +159,27 @@ export async function createApp(opts: AppOptions = {}): Promise<RunningApp> {
     } catch (err) {
       console.error('[upload]', (err as Error).message);
       res.status(500).json({ error: 'Upload failed' });
+    }
+  });
+
+  // deleting from the start page (inside a board the socket's `deleteBoard` is used)
+  app.post('/api/boards/:id/delete', express.json({ limit: '2kb' }), async (req, res) => {
+    try {
+      const id = req.params.id;
+      if (!ID_RE.test(id)) return void res.status(400).json({ ok: false, error: 'Invalid board code' });
+      const ip = ipOf(req);
+      if (passcode) {
+        if (fails.blocked(ip)) return void tooMany(res, fails, ip, TOO_MANY_TRIES);
+        if (!passOk(req.header('x-passcode'))) { fails.hit(ip); return void res.status(401).json({ ok: false, error: 'Wrong passcode' }); }
+      }
+      if (!deletes.hit(ip)) return void tooMany(res, deletes, ip, TOO_MANY_DELETES);
+      const by = typeof req.body?.by === 'string' ? (req.body.by as string).trim().slice(0, 40) : '';
+      // a board that was never saved and is not open has nothing to delete (and leaves no trace)
+      if (!store.isDeleted(id) && (await store.exists(id))) await deleteBoard(id, by);
+      res.json({ ok: true });
+    } catch (err) {
+      console.error('[delete]', (err as Error).message);
+      res.status(500).json({ ok: false, error: 'The board could not be deleted' });
     }
   });
 
@@ -222,6 +249,17 @@ export async function createApp(opts: AppOptions = {}): Promise<RunningApp> {
     store.release(nbId); // the room is dropped from memory once nobody is left and it is saved
   };
 
+  /** Deletes a board and sends everyone in it (except `fromSid`, who asked) back to the start page. */
+  async function deleteBoard(nbId: string, by: string, fromSid?: string) {
+    const done = store.deleteNotebook(nbId, by); // refuses the id from here on
+    for (const s of io.sockets.sockets.values()) {
+      if ((s.data.ctx as Ctx | undefined)?.nbId !== nbId) continue;
+      if (s.id !== fromSid) s.emit('deleted', { by });
+      leave(s);
+    }
+    await done;
+  }
+
   io.on('connection', (socket) => {
     const ctx: Ctx = { nbId: null, room: null, user: null };
     socket.data.ctx = ctx;
@@ -257,8 +295,14 @@ export async function createApp(opts: AppOptions = {}): Promise<RunningApp> {
         return;
       }
       if (ctx.nbId) leave(socket);
+      if (store.isDeleted(data.notebookId)) { ack?.({ ok: false, error: 'deleted' } satisfies JoinAck); return; }
       const room = await store.acquire(data.notebookId);
       if (!socket.connected) { store.release(data.notebookId); return; }
+      if (store.isDeleted(data.notebookId)) { // deleted while it was loading
+        store.release(data.notebookId);
+        ack?.({ ok: false, error: 'deleted' } satisfies JoinAck);
+        return;
+      }
       if (ctx.nbId) leave(socket); // a second join overtook this one
       const color = pickColor(data.notebookId, data.color);
       ctx.nbId = data.notebookId;
@@ -395,6 +439,13 @@ export async function createApp(opts: AppOptions = {}): Promise<RunningApp> {
       ack?.({ ok: true });
     });
 
+    on('deleteBoard', S.deleteBoardMsg, async (_data, ack) => {
+      if (!ctx.nbId || !ctx.user) { ack?.({ ok: false, error: 'not joined' }); return; }
+      if (!deletes.hit(socketIp(socket))) { ack?.({ ok: false, error: TOO_MANY_DELETES }); return; }
+      await deleteBoard(ctx.nbId, ctx.user.name, socket.id);
+      ack?.({ ok: true });
+    });
+
     on('timer', S.timerMsg, (data) => {
       const room = ctx.room;
       if (!room || !ctx.nbId) return;
@@ -426,6 +477,9 @@ export async function createApp(opts: AppOptions = {}): Promise<RunningApp> {
       void store.sweepUploads()
         .then((gone) => { if (gone.length && !opts.quiet) console.log(`[uploads] removed ${gone.length} unused image file(s)`); })
         .catch((err) => console.error('[uploads] sweep failed:', (err as Error).message));
+      void store.purgeDeleted()
+        .then((gone) => { if (gone.length && !opts.quiet) console.log(`[deleted] removed the files of ${gone.length} board(s) deleted more than 30 days ago`); })
+        .catch((err) => console.error('[deleted] purge failed:', (err as Error).message));
     };
     sweep();
     sweepTimer = setInterval(sweep, DAY);

@@ -14,6 +14,8 @@ export interface SyncHandlers {
   onTimer(timer: TimerState | null): void;
   onStatus(): void;
   onFatal(reason: string): void;
+  /** the board was deleted: by someone while I had it open (`by`, '' if unknown), or before I joined (null) */
+  onDeleted(by: string | null): void;
   onLive(event: string, data: any): void;
 }
 
@@ -65,6 +67,7 @@ export class Sync {
       this.h.onSnapshot(m.notebook, { first: false, pending: this.pending, restoredBy: m.by });
     });
     s.on('timer', (m: { timer: TimerState | null; now: number }) => { this.clock(m.now); this.h.onTimer(m.timer); });
+    s.on('deleted', (m: { by?: unknown }) => { if (!this.closed) this.h.onDeleted(typeof m?.by === 'string' ? m.by : ''); });
     for (const ev of LIVE_EVENTS) s.on(ev, (data: unknown) => this.h.onLive(ev, data));
     window.addEventListener('offline', this.onOffline);
     window.addEventListener('online', this.onOnline);
@@ -110,6 +113,7 @@ export class Sync {
     const { notebookId, userId, name, color, passcode } = this.opts;
     this.socket.emit('join', { notebookId, userId, name, color, passcode: passcode || undefined, pending: this.pendingIds().slice(0, 20000) }, (ack: JoinAck) => {
       if (this.closed) return;
+      if (ack?.error === 'deleted') { this.h.onDeleted(null); return; }
       if (!ack?.ok || !ack.notebook) {
         this.h.onFatal(ack?.error === 'passcode' ? 'passcode' : 'join');
         return;
@@ -211,6 +215,15 @@ export class Sync {
       if (!this.joined) { resolve(false); return; }
       this.pending = [];
       this.socket.timeout(30000).emit('restore', { notebook: nb }, (err: unknown, res?: { ok: boolean }) => resolve(!err && !!res?.ok));
+    });
+  }
+
+  /** Deletes the board for everyone. Resolves with the server's answer. */
+  deleteBoard(): Promise<{ ok: boolean; error?: string }> {
+    return new Promise((resolve) => {
+      if (!this.joined) { resolve({ ok: false, error: 'Not connected to the server. Wait until it says Connected and try again.' }); return; }
+      this.socket.timeout(30000).emit('deleteBoard', {}, (err: unknown, res?: { ok: boolean; error?: string }) =>
+        resolve(err ? { ok: false, error: 'The server did not answer. Try again.' } : res ?? { ok: false }));
     });
   }
 

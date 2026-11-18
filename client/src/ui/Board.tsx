@@ -22,9 +22,11 @@ interface BoardProps {
   passcode: string;
   onExit: () => void;
   onBadPasscode: () => void;
+  /** the board was deleted (by me or someone else): back to the start page with this message */
+  onDeleted: (message: string) => void;
 }
 
-export function Board({ notebookId, name, userId, passcode, onExit, onBadPasscode }: BoardProps) {
+export function Board({ notebookId, name, userId, passcode, onExit, onBadPasscode, onDeleted }: BoardProps) {
   const host = useRef<HTMLDivElement>(null);
   const [ctx, setCtx] = useState<{ engine: Engine; ui: Store<UIState> } | null>(null);
 
@@ -78,6 +80,7 @@ export function Board({ notebookId, name, userId, passcode, onExit, onBadPasscod
         {ctx && <Dialogs />}
         {ctx && <Toasts />}
         {ctx && <TitleSync notebookId={notebookId} />}
+        {ctx && <DeletedWatch notebookId={notebookId} onDeleted={onDeleted} />}
         <Tooltips />
       </Ctx.Provider>
     </div>
@@ -102,6 +105,20 @@ function TitleSync({ notebookId }: { notebookId: string }) {
     if (conn !== 'connected') lost.current = true;
     else if (lost.current) { lost.current = false; engine.toast('Connected again — everything is synced'); }
   }, [conn, ready, engine]);
+  return null;
+}
+
+/** Leaves the board once it has been deleted, saying by whom. */
+function DeletedWatch({ notebookId, onDeleted }: { notebookId: string; onDeleted: (message: string) => void }) {
+  const deleted = useUI((s) => s.deleted);
+  const title = useUI((s) => s.title);
+  useEffect(() => {
+    if (!deleted) return;
+    const name = title && title !== DEFAULT_TITLE ? `“${title}”` : `Board ${notebookId}`;
+    onDeleted(deleted.refused ? `Board ${notebookId} was deleted, so it can no longer be opened.`
+      : deleted.mine ? `${name} was deleted.`
+        : deleted.by ? `${name} was deleted by ${deleted.by}.` : `${name} was deleted.`);
+  }, [deleted, title, notebookId, onDeleted]);
   return null;
 }
 

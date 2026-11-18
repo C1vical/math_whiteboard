@@ -205,6 +205,34 @@ describe('B11 — first visit follows the system theme', () => {
   });
 });
 
+describe('one highlighter: no highlighter among the default pens', () => {
+  afterEach(() => { vi.unstubAllGlobals(); vi.resetModules(); });
+  const storage = (saved: unknown) => ({ getItem: () => (saved === null ? null : JSON.stringify(saved)), setItem: () => {}, removeItem: () => {} });
+  const pen = (id: string, kind: string) => ({ id, pen: kind, color: 'ink', size: 3, stab: 30 });
+
+  it('defaults have no highlighter pen, and the old default one is dropped from saved toolbars once', async () => {
+    vi.stubGlobal('matchMedia', () => ({ matches: false }));
+    const { loadSettings, defaultSettings } = await import('../client/src/engine/store');
+    expect(defaultSettings().favs.some((f) => f.pen === 'highlighter')).toBe(false);
+
+    // an older save: f1–f6 with the yellow highlighter pen, the pen after it selected
+    const old = ['ballpoint', 'ballpoint', 'ballpoint', 'ballpoint', 'pencil', 'highlighter', 'marker'].map((k, i) => pen(i === 6 ? 'abc123' : `f${i + 1}`, k));
+    vi.stubGlobal('localStorage', storage({ favs: old, activeFav: 6 }));
+    let s = loadSettings();
+    expect(s.favs.map((f) => f.id)).toEqual(['f1', 'f2', 'f3', 'f4', 'f5', 'abc123']);
+    expect(s.favs[s.activeFav].id).toBe('abc123'); // still the same pen selected
+    expect(s.v).toBe(2);
+
+    // a highlighter pen someone added themselves stays, and so does anything in a current save
+    vi.stubGlobal('localStorage', storage({ favs: [pen('f1', 'ballpoint'), pen('xyz789', 'highlighter')], activeFav: 1 }));
+    expect(loadSettings().favs.map((f) => f.id)).toEqual(['f1', 'xyz789']);
+    vi.stubGlobal('localStorage', storage({ v: 2, favs: [pen('f1', 'ballpoint'), pen('f6', 'highlighter')], activeFav: 1 }));
+    s = loadSettings();
+    expect(s.favs.map((f) => f.id)).toEqual(['f1', 'f6']);
+    expect(s.activeFav).toBe(1);
+  });
+});
+
 describe('B12 — installable on iPad', () => {
   const pngSize = (f: string) => { const b = readFileSync(f); return [b.readUInt32BE(16), b.readUInt32BE(20)]; };
 

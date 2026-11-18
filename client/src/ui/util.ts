@@ -42,6 +42,11 @@ export function rememberBoard(id: string, title?: string) {
   ls.set(RECENT_KEY, JSON.stringify(list));
 }
 
+/** Takes a board off the recent list (it was deleted). */
+export function forgetBoard(id: string) {
+  ls.set(RECENT_KEY, JSON.stringify(loadRecent().filter((r) => r.id !== id)));
+}
+
 /** Copies text to the system clipboard, with a fallback for non-secure origins (e.g. a LAN IP). */
 export async function copyText(text: string): Promise<boolean> {
   try {
